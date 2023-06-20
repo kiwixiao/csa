@@ -2,7 +2,7 @@
 function [] = SlicerMasterCode(subject, path)
 
 
-disp(['this is for subject', subject]);
+disp(['this is for subject: ', subject]);
 disp(['slicing partition: ',path]);
 
 %path = 'LeftNoseDecending';

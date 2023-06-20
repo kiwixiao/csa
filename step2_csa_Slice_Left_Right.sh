@@ -2,6 +2,19 @@
 
 echo this script calling scrpts in folder LeftNoseDecending/FFD/
 
-(cd ./LeftNoseDecending/FFD && ./step2To4_unified.sh)
+(cd ./LeftNoseDecending/FFD && ./step2To4.sh)
+if [ $? eq 0 ]; then
+	echo "Left side slicing success."
+else
+	echo "Left side slicing failed."
+	echo "Existing the code"
+	exit 1
+fi
 
-(cd ./RightNose/FFD && ./step2To4_unified.sh)
+(cd ./RightNose/FFD && ./step2To4.sh)
+if [ $? eq 0 ]; then
+	echo Right slicing code done successfully.
+else
+	echo "Right slicing code failed."
+	exit 1
+fi

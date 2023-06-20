@@ -10,15 +10,16 @@ function [perimeter, hydDiam, diameter] = PerimeterandhydDiamCalc(n)
         doHydDiameter = true;
 %     planeFilename = [filenameStart '-Planes-'];
 
- disp('you picked to calculate the left side diameter first')
- disp('now we need to double check both left side and right side have the same amount time points data')
- left_numFiles = length(dir(['./LeftNoseDecendingSlicedSTLs'  '/out_*-All.stl']));
- right_numFiles = length(dir(['./RightNoseSlicedSTLs' '/out_*-All.stl']));
+% disp('you picked to calculate the left side diameter first')
+disp('now we need to double check both left side and right side have the same amount time points data')
+left_numFiles = length(dir(['./LeftNoseDecendingSlicedSTLs'  '/out_*-All.stl']));
+right_numFiles = length(dir(['./RightNoseSlicedSTLs' '/out_*-All.stl']));
         if left_numFiles == right_numFiles
             disp('left and right side have the same time points data')
             fileNumberCheck = true;
         else
-            disp('left and right time points are not the same')
+            disp('left and right time points are not the same'i)
+	    disp('The perimeter calculation will not run and stopping now...')
             fileNumberCheck = false;
             return
         end
