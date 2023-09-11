@@ -9,10 +9,10 @@ import star.base.neo.*;
 
 public class ExportStarPlotData extends StarMacro {
 
-private String subject = "Inspire04";
+private String subject = "Inspire05";
 private String category = "CT003";
 
-private String path = "/storage/Qiwei/cchmc_OSA/CCHMCProjects/PythonProjects/PlotsByPython";
+private String path = "/storage/Qiwei/"+subject+"/"+subject+category;
 private String outPath =path+"/files_"+subject+category+"/"+subject+category;
 
 

@@ -10,8 +10,8 @@ import star.meshing.*;
 
 public class exportBoundaryForCSA extends StarMacro {
 
-  private String sub = "Inspire04";
-  private String outPath="/storage/Qiwei/cchmc_OSA/CCHMCProjects/PythonProjects/CSAmeasurements/";
+  private String sub = "Inspire05";
+  private String outPath="/storage/Qiwei/"+sub+"/";
   private String category = "CT003";
   public void execute() {
     execute0();
