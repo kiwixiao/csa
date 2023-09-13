@@ -43,19 +43,19 @@ public class exportBoundaryForCSA extends StarMacro {
     SurfaceRepBoundary Mask = 
       ((SurfaceRepBoundary) surfaceRepRegion_0.getSurfaceBoundaries().getObject(sub+category+".Mask"));
 
-    Nasopharynx.exportStlBoundary(new NeoObjectVector(new Object[] {Nasopharynx}), resolvePath(outPath+sub+category+"/"+sub+category+"_Nasopharynx.stl"), true);
+    Nasopharynx.exportStlBoundary(new NeoObjectVector(new Object[] {Nasopharynx}), resolvePath(outPath+sub+category+"CSA/"+sub+category+"_Nasopharynx.stl"), true);
 
-    Oropharynx.exportStlBoundary(new NeoObjectVector(new Object[] {Oropharynx}), resolvePath(outPath+sub+category+"/"+sub+category+"_Oropharynx.stl"), true);
+    Oropharynx.exportStlBoundary(new NeoObjectVector(new Object[] {Oropharynx}), resolvePath(outPath+sub+category+"CSA/"+sub+category+"_Oropharynx.stl"), true);
 
-    Larynx.exportStlBoundary(new NeoObjectVector(new Object[] {Larynx}), resolvePath(outPath+sub+category+"/"+sub+category+"_Larynx.stl"), true);
+    Larynx.exportStlBoundary(new NeoObjectVector(new Object[] {Larynx}), resolvePath(outPath+sub+category+"CSA/"+sub+category+"_Larynx.stl"), true);
 
-    Trachea.exportStlBoundary(new NeoObjectVector(new Object[] {Trachea}), resolvePath(outPath+sub+category+"/"+sub+category+"_Trachea.stl"), true);
+    Trachea.exportStlBoundary(new NeoObjectVector(new Object[] {Trachea}), resolvePath(outPath+sub+category+"CSA/"+sub+category+"_Trachea.stl"), true);
 
-    Mask.exportStlBoundary(new NeoObjectVector(new Object[] {Mask}), resolvePath(outPath+sub+category+"/"+sub+category+"_Mask.stl"), true);
+    Mask.exportStlBoundary(new NeoObjectVector(new Object[] {Mask}), resolvePath(outPath+sub+category+"CSA/"+sub+category+"_Mask.stl"), true);
 
-    RightNose.exportStlBoundary(new NeoObjectVector(new Object[] {RightNose}), resolvePath(outPath+sub+category+"/"+sub+category+"_RightNose.stl"), true);
+    RightNose.exportStlBoundary(new NeoObjectVector(new Object[] {RightNose}), resolvePath(outPath+sub+category+"CSA/"+sub+category+"_RightNose.stl"), true);
 
-    LeftNose.exportStlBoundary(new NeoObjectVector(new Object[] {LeftNose,Nasopharynx,Oropharynx,Larynx,Trachea}), resolvePath(outPath+sub+category+"/"+sub+category+"_LeftNoseDecending.stl"), true);
+    LeftNose.exportStlBoundary(new NeoObjectVector(new Object[] {LeftNose,Nasopharynx,Oropharynx,Larynx,Trachea}), resolvePath(outPath+sub+category+"CSA/"+sub+category+"_LeftNoseDecending.stl"), true);
     
   }
 }

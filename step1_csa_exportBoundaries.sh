@@ -61,6 +61,15 @@ if [ $ans == "No|no|N|n" ]; then
 	sed -i "s/private\ String\ category\ = .*;/private\ String\ category\ =\ \"$category\";/" $macro
 
 else
+	dir=files_"$sub""$category"
+	if [ -d "$dir" ]; then
+	       echo "star table folder exist, overwitring..."
+	       rm -r "$dir"	
+        else
+		echo "star table folder not exist, creating..."
+	fi
+	mkdir "$dir"
+	echo "Folder for simulation result created..."
 	#	replace the subject name for: export boundary macro
 	sed -i "s/private\ String\ sub\ = .*;/private\ String\ sub\ =\ \"$sub\";/" $macro
 	check_status "replacing subject ID in export boundary macro failed."
@@ -74,8 +83,6 @@ else
 fi
 
 #		define the simulation path
-#simpath="/storage/Qiwei/cchmc_OSA/Projects_local/InspireProject/$sub$category/$sub*final*.sim"
-
 echo This is marco for export boundaries from CFD simulation: $macro
 echo This is the macro for export star plot table for non-geometric analysis: $macro2
 
@@ -98,4 +105,7 @@ check_status "Exporting 3D geometries failed, it can be either wrong macro setup
 ./functions/convertSTLwithScaledPostfix.sh
 check_status "Scale stl back to meters failed"
 
-/opt/Siemens/14.06.012-R8/STAR-CCM+14.06.012-R8/star/bin/starccm+ -batch $macro2 -power -podkey $lic_key -licpath 1999@flex.cd-adapco.com -rsh ssh $simpath
+if [ $ans == yes ]; then
+	/opt/Siemens/14.06.012-R8/STAR-CCM+14.06.012-R8/star/bin/starccm+ -batch $macro2 -power -podkey $lic_key -licpath 1999@flex.cd-adapco.com -rsh ssh $simpath
+fi
+

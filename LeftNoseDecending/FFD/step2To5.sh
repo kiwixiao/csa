@@ -18,4 +18,4 @@ echo this is the path for runMatlabSlicer input $path
 
 ../../functions/runMatlabSlicer.sh "$sub" $path && echo 'Step 4 done now. this should be all if you see this.' >> debug_masterShellCodeLogFile.txt
 
-#./Step5_cal_Diameter.sh && echo Seeing this line means step 5 is done, FYI, the diameter calculation is also using default 100 ms as the interloplation step.
+./Step5_cal_Diameter.sh && echo Seeing this line means step 5 is done, FYI, the diameter calculation is also using default 100 ms as the interloplation step.

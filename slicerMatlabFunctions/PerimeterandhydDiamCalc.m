@@ -18,7 +18,7 @@ right_numFiles = length(dir(['./RightNoseSlicedSTLs' '/out_*-All.stl']));
             disp('left and right side have the same time points data')
             fileNumberCheck = true;
         else
-            disp('left and right time points are not the same'i)
+            disp('left and right time points are not the same')
 	    disp('The perimeter calculation will not run and stopping now...')
             fileNumberCheck = false;
             return

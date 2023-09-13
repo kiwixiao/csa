@@ -1,29 +1,19 @@
-#!/usr/bin/python3
-"""
-Decimation
-~~~~~~~~~~
-
-Decimate a mesh
-
-"""
-# sphinx_gallery_thumbnail_number = 4
-import subprocess
 import sys
-#import pyvista as pv
-#from pyvista import examples
-#import pyinputplus as pyip
-import os
-from stl import mesh
-import numpy as np
-import trimesh
+import pyvista as pv
 
-# userin = pyip.inputStr(prompt='Enter the path and name of the stl File:')
-userin = sys.argv[1]
-print("this is the file for decimate")
-#mesh = pv.read(userin)
-mesh = trimesh.load_mesh(userin)
-mesh.fix_normals()
-mesh.decimate(target_percent=0.3)
-mesh.export(userin[:-4]+"_decimated.stl")
-#decimated.plot(cpos=cpos, **dargs)
+# Get the input file name from the command line arguments
+input_file = sys.argv[1]
+
+# Load the STL file
+#mesh = o3d.io.read_triangle_mesh(input_file)
+mesh = pv.read(input_file)
+
+
+# Decimate the mesh
+decimated_mesh = mesh.decimate(target_reduction=0.95)  # Adjust the target_reduction value as needed
+
+# Save the decimated mesh
+output_file = input_file[:-4] + "_decimated.stl"
+
+decimated_mesh.save(output_file)
 
