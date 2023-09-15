@@ -10,4 +10,4 @@ echo "this will read the position argument from the master shell script."
 #filepath=$(pwd)
 #echo $filepath
 
-matlab -nodisplay -r " try cd('../slicerMatlabFunctions'); SlicerMasterCode('$1','$2'); catch; end; quit"
+matlab -nodisplay -r "try; cd('../../slicerMatlabFunctions'); SlicerMasterCode('$1','$2'); catch ME; disp(ME.message); end; quit"
