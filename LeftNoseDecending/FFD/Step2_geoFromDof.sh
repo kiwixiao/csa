@@ -6,7 +6,7 @@ read -e -p "Interpolation step(ms): (default=100) " inteStep
 #read -e -p "STL frame 0: " stl0
 #read -e -p "Do you have the input.txt file ready? " ans
 
-inteStep=${name:-100}
+inteStep=${inteStep:-100}
 export it=$inteStep # export this for the right side to use.
 
 Image0=$(ls *.nii.gz)
@@ -33,7 +33,7 @@ python3 ../../functions/centerlineInterp.py \
   --output-table "motiontable_CTL.csv"
 
 python3 ../../functions/Interp.py \
-  --target "$Image" \
+  --target "$Image0" \
   --dofs ffds.csv \
   --mesh "$stl0" \
   --start 0 \
