@@ -1,6 +1,6 @@
 # use dof file export stl use for Virtual DISE
 #!/bin/bash
-#read -e -p "Interpolation step: " inteStep
+read -e -p "Interpolation step: " inteStep
 #read -e -p "Image at frame 0: " Image0
 #read -e -p "Centerline frame 0: " centerline0
 #read -e -p "STL frame 0: " stl0
@@ -9,7 +9,7 @@
 #source ../../LeftNoseDecending/FFD/Step2_geoFromDof.sh 
 #inteStep=$it
 
-inteStep=100 # this is default value, consistant with left side.
+inteStep=${inteStep:-100} # this is default value, consistant with left side.
 Image0=$(ls *.nii.gz)
 centerline0=$(ls *CL_smooth.vtp)
 stl0=$(ls *Scaled.stl)
@@ -34,7 +34,7 @@ python3 ../../functions/centerlineInterp.py \
   --output-table "motiontable_CTL.csv"
 
 python3 ../../functions/Interp.py \
-  --target "$Image" \
+  --target "$Image0" \
   --dofs ffds.csv \
   --mesh "$stl0" \
   --start 0 \
