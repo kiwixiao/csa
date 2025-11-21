@@ -1,0 +1,277 @@
+#!/usr/bin/env python3
+"""
+Create Consistent Non-Overlapping Planes Across Breathing Cycle
+
+Strategy:
+1. Smooth centerline points (not just normals)
+2. For first time point, create planes sequentially and validate no overlap
+3. Use the same plane indices for all other time points
+"""
+
+import sys
+import numpy as np
+from pathlib import Path
+import glob
+from scipy.ndimage import uniform_filter1d
+
+sys.path.insert(0, 'python_slicer')
+from slicer.io_utils import read_vtk_centerline
+
+
+def smooth_centerline(centerline: np.ndarray, window: int = 5) -> np.ndarray:
+    """
+    Smooth centerline points using moving average
+
+    Args:
+        centerline: Nx3 array of points
+        window: Window size for moving average
+
+    Returns:
+        Smoothed Nx3 array
+    """
+    if len(centerline) < window:
+        return centerline
+
+    # Pad edges
+    padded = np.pad(centerline, ((window//2, window//2), (0, 0)), mode='edge')
+
+    # Apply moving average
+    smoothed = uniform_filter1d(padded, size=window, axis=0)
+
+    # Remove padding
+    result = smoothed[window//2:window//2+len(centerline)]
+
+    return result
+
+
+def compute_plane_normal(centerline: np.ndarray, index: int) -> np.ndarray:
+    """
+    Compute normal at centerline point (tangent direction)
+
+    Args:
+        centerline: Nx3 array
+        index: Point index
+
+    Returns:
+        Unit normal vector
+    """
+    n = len(centerline)
+
+    if index == 0:
+        tangent = centerline[1] - centerline[0]
+    elif index == n - 1:
+        tangent = centerline[-1] - centerline[-2]
+    else:
+        tangent = centerline[index + 1] - centerline[index - 1]
+
+    # Normalize
+    return tangent / np.linalg.norm(tangent)
+
+
+def check_plane_ahead_of_previous(current_vertices: np.ndarray,
+                                   prev_plane_point: np.ndarray,
+                                   prev_plane_normal: np.ndarray,
+                                   tolerance: float = 0.1) -> tuple:
+    """
+    Check if ALL vertices of current plane are ahead of previous plane
+
+    Args:
+        current_vertices: Nx3 vertices of current plane
+        prev_plane_point: Point on previous plane
+        prev_plane_normal: Normal of previous plane (pointing forward)
+        tolerance: Distance tolerance (mm)
+
+    Returns:
+        (all_ahead: bool, min_distance: float, pct_ahead: float)
+    """
+    # Signed distance from vertices to previous plane
+    # Positive = ahead, negative = behind
+    prev_plane_normal = prev_plane_normal / np.linalg.norm(prev_plane_normal)
+    distances = np.dot(current_vertices - prev_plane_point, prev_plane_normal)
+
+    min_dist = np.min(distances)
+    pct_ahead = 100 * np.sum(distances > tolerance) / len(distances)
+
+    # All vertices should be ahead (positive distance)
+    all_ahead = min_dist > -tolerance
+
+    return all_ahead, min_dist, pct_ahead
+
+
+def find_valid_plane_indices(vtk_path: str,
+                             stl_path: str,
+                             centerline_smooth_window: int = 5,
+                             min_plane_spacing: float = 0.5) -> list:
+    """
+    Find valid non-overlapping plane indices for a single time point
+
+    Args:
+        vtk_path: Path to VTK centerline
+        stl_path: Path to STL mesh
+        centerline_smooth_window: Window for centerline smoothing
+        min_plane_spacing: Minimum spacing between planes (mm)
+
+    Returns:
+        List of valid plane indices
+    """
+    from slicer.io_utils import read_stl
+    from slicer.mesh_intersection import MeshPlaneSlicer
+
+    print(f"\nAnalyzing: {Path(vtk_path).name}")
+    print("="*80)
+
+    # Load data
+    centerline = read_vtk_centerline(vtk_path)
+    mesh = read_stl(stl_path)
+
+    print(f"Original centerline points: {len(centerline)}")
+
+    # Smooth centerline for computing normals only
+    centerline_smooth = smooth_centerline(centerline, window=centerline_smooth_window)
+    print(f"Smoothed centerline for normal computation (window={centerline_smooth_window})")
+
+    # Create slicer
+    slicer = MeshPlaneSlicer(mesh)
+
+    # Try each plane sequentially
+    valid_indices = []
+    prev_plane_point = None
+    prev_plane_normal = None
+    prev_centroid = None
+
+    for i in range(len(centerline)):
+        # Use ORIGINAL position for plane origin (correct intersection location)
+        plane_point = centerline[i]
+        # Use SMOOTHED centerline for computing normal (smooth orientation)
+        plane_normal = compute_plane_normal(centerline_smooth, i)
+
+        # Ensure normal consistency
+        if prev_plane_normal is not None:
+            if np.dot(plane_normal, prev_plane_normal) < 0:
+                plane_normal = -plane_normal
+
+        # Slice mesh
+        try:
+            cross_sections = slicer.slice_mesh_with_plane(
+                plane_origin=plane_point,
+                plane_normal=plane_normal,
+                plane_number=i
+            )
+        except:
+            continue
+
+        if not cross_sections:
+            continue
+
+        # Get best section (closest to centerline)
+        best_section = None
+        best_dist = float('inf')
+        for section in cross_sections:
+            dist = np.linalg.norm(section.centroid - plane_point)
+            if dist < best_dist:
+                best_dist = dist
+                best_section = section
+
+        if best_section is None:
+            continue
+
+        # Check if this plane is valid
+        is_valid = True
+        reason = ""
+
+        # Check 1: If not first plane, must be ahead of previous
+        if prev_plane_point is not None:
+            all_ahead, min_dist, pct_ahead = check_plane_ahead_of_previous(
+                best_section.vertices,
+                prev_plane_point,
+                prev_plane_normal
+            )
+
+            if not all_ahead:
+                is_valid = False
+                reason = f"overlaps prev (min_dist={min_dist:.2f}mm)"
+
+        # Check 2: Minimum spacing from previous centroid
+        if is_valid and prev_centroid is not None:
+            spacing = np.linalg.norm(best_section.centroid - prev_centroid)
+            if spacing < min_plane_spacing:
+                is_valid = False
+                reason = f"too close (spacing={spacing:.2f}mm)"
+
+        # Accept or reject
+        if is_valid:
+            valid_indices.append(i)
+            prev_plane_point = plane_point
+            prev_plane_normal = plane_normal
+            prev_centroid = best_section.centroid
+
+            if len(valid_indices) % 20 == 0:
+                print(f"  Valid planes so far: {len(valid_indices)}")
+        else:
+            if i < 10 or i % 20 == 0:  # Print early rejections and periodic updates
+                print(f"  Plane {i}: SKIP ({reason})")
+
+    print(f"\n{'='*80}")
+    print(f"Valid planes: {len(valid_indices)} / {len(centerline_smooth)}")
+    print(f"Valid plane indices: {valid_indices[:10]}... (showing first 10)")
+    print(f"{'='*80}")
+
+    return valid_indices
+
+
+def main():
+    """
+    Find valid plane indices for first time point
+    """
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description="Find consistent non-overlapping plane indices"
+    )
+    parser.add_argument('--partition', default='LeftNoseDecending',
+                       help='Partition name')
+    parser.add_argument('--window', type=int, default=5,
+                       help='Centerline smoothing window')
+    parser.add_argument('--spacing', type=float, default=0.5,
+                       help='Minimum plane spacing (mm)')
+
+    args = parser.parse_args()
+
+    # Use first file as reference
+    vtk_dir = Path(args.partition) / "FFD" / "vtk"
+    stl_dir = Path(args.partition) / "FFD" / "stl"
+
+    vtk_files = sorted(glob.glob(str(vtk_dir / "*.vtk")))
+    stl_files = sorted(glob.glob(str(stl_dir / "*.stl")))
+
+    if not vtk_files:
+        print(f"Error: No VTK files in {vtk_dir}")
+        return
+
+    print("="*80)
+    print("Finding Valid Non-Overlapping Plane Indices")
+    print("="*80)
+    print(f"Partition: {args.partition}")
+    print(f"Centerline smoothing window: {args.window}")
+    print(f"Minimum plane spacing: {args.spacing} mm")
+    print(f"Using reference file: {Path(vtk_files[0]).name}")
+
+    # Find valid indices
+    valid_indices = find_valid_plane_indices(
+        vtk_files[0],
+        stl_files[0],
+        centerline_smooth_window=args.window,
+        min_plane_spacing=args.spacing
+    )
+
+    # Save indices
+    output_file = f"{args.partition}_valid_plane_indices.txt"
+    with open(output_file, 'w') as f:
+        f.write('\n'.join(map(str, valid_indices)))
+
+    print(f"\nSaved valid plane indices to: {output_file}")
+    print(f"These indices will be used for ALL time points in {args.partition}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,33 @@
+# Python Slicer - Requirements
+# Replacement for MATLAB slicer pipeline
+
+# Core numerical computing
+numpy>=1.24.0
+
+# Scientific computing and optimization
+scipy>=1.10.0
+
+# Mesh processing and 3D geometry
+trimesh>=4.0.0
+
+# VTK file I/O and visualization
+pyvista>=0.43.0
+
+# 2D geometry operations (polygon handling, doughnuts detection)
+shapely>=2.0.0
+
+# Data handling and CSV export
+pandas>=2.0.0
+
+# Visualization (optional, for debugging)
+matplotlib>=3.7.0
+
+# Testing
+pytest>=7.4.0
+
+# Additional mesh processing dependencies
+networkx>=3.0  # Required by trimesh for graph operations
+rtree>=1.0.0  # Spatial indexing for trimesh
+
+# Optional but recommended for better performance
+# scikit-learn>=1.3.0  # For advanced ellipse fitting

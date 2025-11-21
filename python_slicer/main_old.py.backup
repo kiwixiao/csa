@@ -1,0 +1,274 @@
+#!/usr/bin/env python3
+"""
+Python Slicer - Main Entry Point
+Replaces: SlicerMasterCode.m
+
+Usage:
+    python main.py <subject_name> <partition>
+
+Examples:
+    python main.py DYMOSA801 LeftNoseDecending
+    python main.py DYMOSA801 RightNose
+"""
+
+import os
+import sys
+import glob
+import shutil
+import argparse
+from pathlib import Path
+import pandas as pd
+import numpy as np
+
+from slicer import AirwaySlicer
+from slicer.io_utils import save_results_pickle
+from slicer.validation import detect_split_regions
+
+
+def process_subject(subject_name: str, partition: str, output_base_dir: str = "."):
+    """
+    Main pipeline - process all STL/VTK pairs for a subject
+
+    Replaces: SlicerMasterCode.m function
+
+    Args:
+        subject_name: Subject ID (e.g., 'DYMOSA801')
+        partition: 'LeftNoseDecending' or 'RightNose'
+        output_base_dir: Base directory for outputs (default: current directory)
+    """
+    print("="*80)
+    print(f"Python Slicer - Cross-Sectional Analysis")
+    print("="*80)
+    print(f"Subject: {subject_name}")
+    print(f"Partition: {partition}")
+    print("="*80)
+
+    # Setup paths (replaces lines 11-12 in MATLAB)
+    # If running from project root, paths are relative to current dir
+    # If running from python_slicer/, paths need ../
+    script_dir = Path(__file__).parent
+    project_root = script_dir.parent
+
+    vtk_dir = project_root / partition / "FFD" / "vtk"
+    stl_dir = project_root / partition / "FFD" / "stl"
+    output_dir = Path(output_base_dir) / f"{partition}SlicedSTLs"
+
+    # Validate input directories
+    if not vtk_dir.exists():
+        print(f"Error: VTK directory not found: {vtk_dir}")
+        sys.exit(1)
+    if not stl_dir.exists():
+        print(f"Error: STL directory not found: {stl_dir}")
+        sys.exit(1)
+
+    # Clean and create output directory (replaces lines 20-27 in MATLAB)
+    if output_dir.exists():
+        print(f"\nCleaning output directory: {output_dir}")
+        shutil.rmtree(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Get all file pairs (replaces lines 15-16 in MATLAB)
+    vtk_files = sorted(glob.glob(str(vtk_dir / "*.vtk")))
+    stl_files = sorted(glob.glob(str(stl_dir / "*.stl")))
+
+    if len(vtk_files) == 0 or len(stl_files) == 0:
+        print(f"Error: No VTK or STL files found")
+        print(f"  VTK files: {len(vtk_files)}")
+        print(f"  STL files: {len(stl_files)}")
+        sys.exit(1)
+
+    if len(vtk_files) != len(stl_files):
+        print(f"Warning: Mismatched file counts")
+        print(f"  VTK files: {len(vtk_files)}")
+        print(f"  STL files: {len(stl_files)}")
+        # Continue anyway - will process pairs that exist
+
+    print(f"\nFound {len(vtk_files)} VTK files and {len(stl_files)} STL files")
+
+    # Storage for all results (replaces cell arrays in MATLAB)
+    all_results = {}
+    all_measurements = []
+
+    # Variables for tracking split regions
+    # Replaces condtru logic in lines 33-63 in MATLAB
+    split_index = None
+
+    # Process each file pair (replaces for loop lines 49-111 in MATLAB)
+    n_files = min(len(vtk_files), len(stl_files))
+
+    for i in range(n_files):
+        vtk_path = vtk_files[i]
+        stl_path = stl_files[i]
+
+        vtk_name = Path(vtk_path).name
+        stl_name = Path(stl_path).name
+
+        print(f"\n{'='*80}")
+        print(f"Processing pair {i+1}/{n_files}")
+        print(f"  VTK: {vtk_name}")
+        print(f"  STL: {stl_name}")
+        print(f"{'='*80}")
+
+        # Create slicer instance
+        slicer = AirwaySlicer(stl_path, vtk_path)
+
+        # Perform slicing (replaces trachSlice_OSA_AB_3 call line 53)
+        results = slicer.slice_along_centerline(quality_checks=True)
+
+        # Detect split regions on first iteration
+        # Replaces lines 58-63 in MATLAB
+        if i == 0 and len(results.valid_positions) > 0:
+            positions_array = np.array(results.valid_positions)
+            split_index = detect_split_regions(positions_array, z_threshold=5.0)
+            if split_index is not None:
+                print(f"\nDetected airway split at index: {split_index}")
+
+        # Compute diameter profile
+        diameter_profile = results.compute_diameter_profile()
+
+        # Get base name for outputs (remove .stl extension)
+        base_name = Path(stl_path).stem
+
+        # Export results (replaces lines 108-109 in MATLAB)
+        slicer.export_results(results, base_name, str(output_dir))
+
+        # Store results
+        all_results[base_name] = {
+            'slicing_results': results,
+            'diameter_profile': diameter_profile,
+            'split_index': split_index
+        }
+
+        # Collect measurements for summary
+        df = diameter_profile.to_dataframe()
+        df['file_name'] = base_name
+        df['file_index'] = i
+        all_measurements.append(df)
+
+    # Save combined results (replaces save() line 113 in MATLAB)
+    print(f"\n{'='*80}")
+    print("Saving combined results...")
+    results_file = Path(output_base_dir) / f"{subject_name}_{partition}_results.pkl"
+    save_results_pickle(str(results_file), all_results)
+
+    # Create summary CSV with all measurements
+    if all_measurements:
+        combined_df = pd.concat(all_measurements, ignore_index=True)
+        summary_csv = Path(output_base_dir) / f"{subject_name}_{partition}_all_measurements.csv"
+        combined_df.to_csv(summary_csv, index=False)
+        print(f"Saved combined measurements: {summary_csv}")
+
+    # Create summary report
+    generate_summary_report(all_results, subject_name, partition, output_base_dir)
+
+    print(f"\n{'='*80}")
+    print("Processing complete!")
+    print(f"{'='*80}")
+
+
+def generate_summary_report(all_results: dict,
+                           subject_name: str,
+                           partition: str,
+                           output_dir: str = "."):
+    """
+    Generate summary report with statistics across all files
+
+    New feature: Comprehensive summary of all processed files
+
+    Args:
+        all_results: Dictionary of results from process_subject
+        subject_name: Subject ID
+        partition: Partition name
+        output_dir: Output directory
+    """
+    summary_data = []
+
+    for file_name, result_dict in all_results.items():
+        results = result_dict['slicing_results']
+        profile = result_dict['diameter_profile']
+
+        # Get summary statistics
+        stats = profile.get_summary_statistics()
+        slicing_summary = results.get_summary()
+
+        # Combine into row
+        row = {
+            'file_name': file_name,
+            'n_valid_planes': slicing_summary['n_valid_planes'],
+            'n_skipped_planes': slicing_summary['n_skipped_planes'],
+            'n_total_planes': slicing_summary['n_total_planes'],
+            **stats
+        }
+
+        summary_data.append(row)
+
+    # Create DataFrame
+    summary_df = pd.DataFrame(summary_data)
+
+    # Save to CSV
+    summary_path = Path(output_dir) / f"{subject_name}_{partition}_summary.csv"
+    summary_df.to_csv(summary_path, index=False)
+
+    print(f"Saved summary report: {summary_path}")
+
+    # Print summary to console
+    print(f"\n{'='*80}")
+    print("Summary Statistics")
+    print(f"{'='*80}")
+    print(f"Total files processed: {len(summary_data)}")
+    print(f"Total valid planes: {summary_df['n_valid_planes'].sum()}")
+    print(f"Total skipped planes: {summary_df['n_skipped_planes'].sum()}")
+    print(f"\nMean cross-sectional area: {summary_df['area_mean_mm2'].mean():.2f} mm²")
+    print(f"Mean hydraulic diameter: {summary_df['hydraulic_diameter_mean_mm'].mean():.2f} mm")
+
+
+def main():
+    """Main entry point"""
+    parser = argparse.ArgumentParser(
+        description="Python Slicer - Airway Cross-Sectional Analysis",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python main.py DYMOSA801 LeftNoseDecending
+  python main.py DYMOSA801 RightNose
+  python main.py --help
+        """
+    )
+
+    parser.add_argument(
+        'subject',
+        type=str,
+        help='Subject name/ID (e.g., DYMOSA801)'
+    )
+
+    parser.add_argument(
+        'partition',
+        type=str,
+        choices=['LeftNoseDecending', 'RightNose'],
+        help='Partition to process (LeftNoseDecending or RightNose)'
+    )
+
+    parser.add_argument(
+        '-o', '--output',
+        type=str,
+        default='.',
+        help='Output base directory (default: current directory)'
+    )
+
+    args = parser.parse_args()
+
+    # Run processing
+    try:
+        process_subject(args.subject, args.partition, args.output)
+    except KeyboardInterrupt:
+        print("\n\nProcessing interrupted by user")
+        sys.exit(1)
+    except Exception as e:
+        print(f"\n\nError: {str(e)}")
+        import traceback
+        traceback.print_exc()
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()
