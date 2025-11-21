@@ -1,0 +1,65 @@
+# Python cache files
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+
+# Data files - DO NOT TRACK
+*.csv
+*.stl
+*.vtk
+*.vtp
+*.vtu
+*.dat
+*.dof.gz
+*.nii.gz
+*.pkl
+
+# Output files - DO NOT TRACK
+*.png
+*.jpg
+*.jpeg
+*.pdf
+*.mp4
+*.avi
+*.html
+
+# Log files
+*.log
+
+# Temporary directories
+*SlicedSTLs/
+*SlicedSTLs_temp/
+archive/
+archive_tests/
+
+# FFD output directories
+*/FFD/stl/
+*/FFD/vtk/
+*/FFD/vtp/
+
+# IDE and editor files
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Lock files
+.~lock.*
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+
+# Claude Code
+.claude/
