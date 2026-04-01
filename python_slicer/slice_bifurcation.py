@@ -233,26 +233,44 @@ def slice_along_midline(mesh, centerline, log, label_prefix=""):
             if section is None:
                 continue
 
-            paths = section.discrete  # list of Nx3 arrays (one per loop)
-            if not paths:
+            # Get 2D planar representation + transform for proper triangulation
+            try:
+                planar, transform = section.to_planar()
+            except Exception:
+                continue
+            polygons = planar.polygons_full
+            paths = section.discrete
+            if not paths or not polygons:
                 continue
 
-            # Compute area for each loop (shoelace on XY projection)
+            # Build loop data with proper triangulation
+            from trimesh.creation import triangulate_polygon
             loop_data = []
-            for path_pts in paths:
-                xy = path_pts[:, :2]
-                x, y = xy[:, 0], xy[:, 1]
-                area = 0.5 * abs(
-                    np.sum(x[:-1] * y[1:] - x[1:] * y[:-1])
-                    + x[-1] * y[0] - x[0] * y[-1]
+            for poly in polygons:
+                if poly.is_empty or poly.area < 1e-6:
+                    continue
+                area = poly.area
+                perimeter = poly.length
+
+                # Proper constrained triangulation (respects concavity)
+                try:
+                    tri_verts_2d, tri_faces = triangulate_polygon(poly)
+                except Exception:
+                    continue
+
+                # Transform back to 3D
+                tri_verts_3d = trimesh.transformations.transform_points(
+                    np.column_stack([tri_verts_2d, np.zeros(len(tri_verts_2d))]),
+                    transform,
                 )
-                perimeter = np.sum(np.linalg.norm(np.diff(path_pts, axis=0), axis=1))
-                centroid = path_pts.mean(axis=0)
+                centroid_3d = tri_verts_3d.mean(axis=0)
+
                 loop_data.append({
-                    "vertices": path_pts,
+                    "vertices": tri_verts_3d,
+                    "faces": tri_faces,
                     "area": area,
                     "perimeter": perimeter,
-                    "centroid": centroid,
+                    "centroid": centroid_3d,
                 })
 
             if not loop_data:
@@ -588,23 +606,18 @@ Examples:
                 areas = np.array([L["area"] for L in loop_data])
                 merged_centroid = np.average(centroids, axis=0, weights=areas)
 
-            # Save merged STL
+            # Save merged STL (proper triangulation, not fan)
             stl_path = output_dir / "LeftNose_Planes" / f"{name}-Left-{left_count:03d}.stl"
-            all_fan_verts, all_fan_faces = [], []
+            all_verts, all_faces = [], []
             offset = 0
             for L in loop_data:
-                verts = L["vertices"]
-                n_v = len(verts)
-                if n_v >= 3:
-                    cp = L["centroid"].reshape(1, 3)
-                    fv = np.vstack([cp, verts])
-                    ff = np.array([[0, i+1, (i+1) % n_v + 1] for i in range(n_v)])
-                    all_fan_verts.append(fv)
-                    all_fan_faces.append(ff + offset)
-                    offset += len(fv)
-            if all_fan_verts:
+                if "faces" in L and len(L["vertices"]) >= 3:
+                    all_verts.append(L["vertices"])
+                    all_faces.append(L["faces"] + offset)
+                    offset += len(L["vertices"])
+            if all_verts:
                 write_cross_section_stl(str(stl_path),
-                    np.vstack(all_fan_verts), np.vstack(all_fan_faces))
+                    np.vstack(all_verts), np.vstack(all_faces))
             left_count += 1
 
             hyd_diam = DiameterCalculator.compute_hydraulic_diameter(total_area, total_perimeter)
@@ -654,21 +667,16 @@ Examples:
                 merged_centroid = np.average(centroids, axis=0, weights=areas)
 
             stl_path = output_dir / "RightNose_Planes" / f"{name}-Right-{right_count:03d}.stl"
-            all_fan_verts, all_fan_faces = [], []
+            all_verts, all_faces = [], []
             offset = 0
             for L in loop_data:
-                verts = L["vertices"]
-                n_v = len(verts)
-                if n_v >= 3:
-                    cp = L["centroid"].reshape(1, 3)
-                    fv = np.vstack([cp, verts])
-                    ff = np.array([[0, i+1, (i+1) % n_v + 1] for i in range(n_v)])
-                    all_fan_verts.append(fv)
-                    all_fan_faces.append(ff + offset)
-                    offset += len(fv)
-            if all_fan_verts:
+                if "faces" in L and len(L["vertices"]) >= 3:
+                    all_verts.append(L["vertices"])
+                    all_faces.append(L["faces"] + offset)
+                    offset += len(L["vertices"])
+            if all_verts:
                 write_cross_section_stl(str(stl_path),
-                    np.vstack(all_fan_verts), np.vstack(all_fan_faces))
+                    np.vstack(all_verts), np.vstack(all_faces))
             right_count += 1
 
             hyd_diam = DiameterCalculator.compute_hydraulic_diameter(total_area, total_perimeter)
