@@ -463,132 +463,6 @@ def generate_combined_plane_stls(frames_dir, output_dir, subject_id):
 # Breathing cycle video
 # ---------------------------------------------------------------------------
 
-def generate_plane_motion_video(combined_dir, motion_stl_dir, output_dir,
-                                subject_id, fps=5):
-    """Create MP4 video showing planes on the full airway through breathing cycle.
-
-    Uses matplotlib 3D rendering. Shows deformed airway (transparent) +
-    all cross-section planes (colored by position).
-    """
-    from mpl_toolkits.mplot3d.art3d import Poly3DCollection
-    import subprocess
-
-    combined_dir = Path(combined_dir)
-    motion_stl_dir = Path(motion_stl_dir)
-
-    plane_files = sorted(combined_dir.glob("*-Planes-All.stl"))
-    if not plane_files:
-        log.warning("  No combined plane STLs found, skipping video")
-        return
-
-    video_frames_dir = output_dir / "video_frames"
-    video_frames_dir.mkdir(parents=True, exist_ok=True)
-
-    # Load first airway mesh for bounds
-    first_airway = None
-    airway_stls = sorted(motion_stl_dir.glob("*.stl"))
-    if airway_stls:
-        first_airway = trimesh.load_mesh(str(airway_stls[0]))
-
-    # Determine global bounds from first frame
-    if first_airway is not None:
-        bounds_min = first_airway.bounds[0]
-        bounds_max = first_airway.bounds[1]
-    else:
-        plane0 = trimesh.load_mesh(str(plane_files[0]))
-        bounds_min = plane0.bounds[0] - 10
-        bounds_max = plane0.bounds[1] + 10
-
-    padding = 10
-    xlim = (bounds_min[0] - padding, bounds_max[0] + padding)
-    ylim = (bounds_min[1] - padding, bounds_max[1] + padding)
-    zlim = (bounds_min[2] - padding, bounds_max[2] + padding)
-
-    log.info(f"  Rendering {len(plane_files)} video frames...")
-
-    for fi, pfile in enumerate(plane_files):
-        frame_name = pfile.stem.replace("-Planes-All", "")
-
-        # Load planes
-        plane_mesh = trimesh.load_mesh(str(pfile))
-
-        # Load corresponding deformed airway (subsample for speed)
-        airway_file = motion_stl_dir / f"{frame_name}.stl"
-        airway_mesh = None
-        if airway_file.exists():
-            airway_mesh = trimesh.load_mesh(str(airway_file))
-
-        # Render
-        fig = plt.figure(figsize=(10, 10))
-        ax = fig.add_subplot(111, projection='3d')
-
-        # Airway (subsampled, transparent)
-        if airway_mesh is not None:
-            step = max(1, len(airway_mesh.faces) // 5000)
-            sub_faces = airway_mesh.faces[::step]
-            airway_coll = Poly3DCollection(
-                airway_mesh.vertices[sub_faces],
-                alpha=0.08, facecolors='lightblue',
-                edgecolors='gray', linewidths=0.05)
-            ax.add_collection3d(airway_coll)
-
-        # Planes (colored by Y position = along airway)
-        if len(plane_mesh.faces) > 0:
-            face_verts = plane_mesh.vertices[plane_mesh.faces]
-            y_coords = face_verts.mean(axis=1)[:, 1]
-            y_min, y_max = y_coords.min(), y_coords.max()
-            colors = plt.cm.rainbow(
-                (y_coords - y_min) / (y_max - y_min + 1e-6))
-            plane_coll = Poly3DCollection(
-                face_verts, alpha=0.6, facecolors=colors,
-                edgecolors='black', linewidths=0.1)
-            ax.add_collection3d(plane_coll)
-
-        ax.set_xlim(xlim)
-        ax.set_ylim(ylim)
-        ax.set_zlim(zlim)
-        ax.view_init(elev=15, azim=45)
-        ax.set_xlabel("X (mm)")
-        ax.set_ylabel("Y (mm)")
-        ax.set_zlabel("Z (mm)")
-
-        phase_ms = frame_name.split("_")[-1] if "_" in frame_name else str(fi)
-        ax.set_title(f"{subject_id} — Breathing Phase {phase_ms}ms\n"
-                     f"{len(plane_mesh.faces)} plane faces",
-                     fontsize=12, fontweight="bold")
-
-        out_frame = video_frames_dir / f"frame_{fi:04d}.png"
-        plt.savefig(str(out_frame), dpi=100, bbox_inches="tight")
-        plt.close()
-
-        if (fi + 1) % 5 == 0 or fi == len(plane_files) - 1:
-            log.info(f"    Frame {fi+1}/{len(plane_files)}")
-
-    # Combine to MP4 with ffmpeg
-    video_path = output_dir / f"{subject_id}_plane_motion.mp4"
-    frame_pattern = str(video_frames_dir / "frame_%04d.png")
-    cmd = [
-        "ffmpeg", "-y",
-        "-framerate", str(fps),
-        "-i", frame_pattern,
-        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
-        "-c:v", "libx264",
-        "-pix_fmt", "yuv420p",
-        "-crf", "23",
-        "-preset", "medium",
-        str(video_path),
-    ]
-
-    try:
-        result = subprocess.run(cmd, capture_output=True, text=True)
-        if result.returncode == 0:
-            log.info(f"  Video: {video_path.name}")
-        else:
-            log.warning(f"  ffmpeg failed: {result.stderr[:200]}")
-    except FileNotFoundError:
-        log.warning("  ffmpeg not found, skipping video encoding")
-
-
 # ---------------------------------------------------------------------------
 # 4-panel breathing cycle video
 # ---------------------------------------------------------------------------
@@ -612,7 +486,10 @@ def _render_pyvista_panel(airway_region_paths=None, airway_mesh_path=None,
     pl = pv.Plotter(off_screen=True, window_size=window_size)
     pl.set_background('white')
 
-    region_color_map = {"DescendingAirway": "gray", "LeftNose": "blue", "RightNose": "red"}
+    region_color_map = {
+        "DescendingAirway": "gray", "LeftNose": "blue",
+        "RightNose": "red", "Mouth": "orange",
+    }
 
     # Airway surface — colored by region or single color
     if airway_region_paths:
@@ -680,7 +557,7 @@ def _render_pyvista_panel(airway_region_paths=None, airway_mesh_path=None,
 
 
 def generate_4panel_video(combined_dir, motion_stl_dir, df, output_dir,
-                          subject_id, fps=5):
+                          subject_id, fps=5, flow_profile_path=None):
     """Create professional 4-panel MP4 using PyVista rendering:
       Top-left:     Full airway STL (45° perspective)
       Top-right:    STL + CSA planes overlay
@@ -724,6 +601,23 @@ def generate_4panel_video(combined_dir, motion_stl_dir, df, output_dir,
     for region in region_stats:
         region_stats[region]["arc_display"] = arc_max - region_stats[region]["arc_mean"]
 
+    # Load flow profile if available
+    flow_df = None
+    if flow_profile_path is None:
+        # Auto-detect in subject dir
+        subject_dir = output_dir.parent
+        for pattern in ["*FlowProfile.csv", "*flowprofile.csv", "*flow_profile.csv"]:
+            matches = list(subject_dir.glob(pattern))
+            if matches:
+                flow_profile_path = matches[0]
+                break
+    if flow_profile_path and Path(flow_profile_path).exists():
+        flow_df = pd.read_csv(flow_profile_path)
+        flow_df.columns = ["time_s", "flow_kgs"]
+        flow_df["time_ms"] = flow_df["time_s"] * 1000
+        log.info(f"  Flow profile: {Path(flow_profile_path).name} "
+                 f"({len(flow_df)} pts, 0-{flow_df['time_ms'].max():.0f}ms)")
+
     # Determine camera positions from first frame
     airway_stls = sorted(motion_stl_dir.glob("*.stl"))
     if not airway_stls:
@@ -758,14 +652,14 @@ def generate_4panel_video(combined_dir, motion_stl_dir, df, output_dir,
         paths = {}
         if face_labels is not None and len(face_labels) == len(mesh.faces):
             from slicer.septum_refine import extract_submesh
-            region_map = {3: "DescendingAirway", 1: "LeftNose", 2: "RightNose"}
+            region_map = {0: "Mouth", 3: "DescendingAirway", 1: "LeftNose", 2: "RightNose"}
             for label_val, region in region_map.items():
                 sub = extract_submesh(mesh, face_labels == label_val)
-                p = tmp_dir / f"{region}.stl"
-                sub.export(str(p))
-                paths[region] = str(p)
+                if len(sub.faces) > 0:
+                    p = tmp_dir / f"{region}.stl"
+                    sub.export(str(p))
+                    paths[region] = str(p)
         else:
-            # Fallback: whole mesh as gray
             paths["DescendingAirway"] = str(deformed_stl_path)
         return paths
 
@@ -801,8 +695,9 @@ def generate_4panel_video(combined_dir, motion_stl_dir, df, output_dir,
             region_plane_paths=region_plane_paths,
             window_size=panel_size, view="sagittal", zoom_factor=0.85)
 
-        # Bottom: Full-width CSA band plot — all 3 regions + current frame
+        # Bottom: CSA band + flow profile (dual y-axis)
         w, h = panel_size
+        phase_ms = frame_name.split("_")[-1] if "_" in frame_name else str(fi)
         dpi = 100
         fig_plot, ax = plt.subplots(figsize=(w * 2 / dpi, h / dpi), dpi=dpi)
 
@@ -825,7 +720,7 @@ def generate_4panel_video(combined_dir, motion_stl_dir, df, output_dir,
         ax.set_ylabel("CSA (mm²)", fontsize=11)
         ax.set_title("CSA — All Regions (band = min/max, thick = current frame)",
                       fontsize=12, fontweight='bold')
-        ax.legend(fontsize=9, loc='upper left')
+        ax.legend(fontsize=8, loc='upper left')
         ax.grid(True, alpha=0.3)
         plt.tight_layout()
 
@@ -834,8 +729,7 @@ def generate_4panel_video(combined_dir, motion_stl_dir, df, output_dir,
         plot_img = plot_img.reshape(fig_plot.canvas.get_width_height()[::-1] + (3,))
         plt.close(fig_plot)
 
-        # Composite: top row [TL | TR], bottom row = full-width plot
-        w, h = panel_size
+        # Composite
         def crop_panel(img, tw, th):
             img = img[:th, :tw, :3]
             if img.shape[0] < th or img.shape[1] < tw:
@@ -845,12 +739,44 @@ def generate_4panel_video(combined_dir, motion_stl_dir, df, output_dir,
             return img
 
         top_row = np.hstack([crop_panel(img_tl, w, h), crop_panel(img_tr, w, h)])
-        # Plot already at correct size, just crop
+
+        # Overlay flow profile on top row
+        if flow_df is not None:
+            fig_flow, ax_flow = plt.subplots(figsize=(w * 2 / dpi, h / dpi), dpi=dpi)
+            fig_flow.patch.set_alpha(0)
+            ax_flow.patch.set_alpha(0)
+            ax_flow.plot(flow_df["time_ms"], flow_df["flow_kgs"],
+                        "-", color="darkgreen", linewidth=2.5, alpha=0.8)
+            ax_flow.axhline(y=0, color="gray", linewidth=0.5, linestyle="--", alpha=0.3)
+            current_ms = float(phase_ms)
+            current_flow = np.interp(current_ms, flow_df["time_ms"], flow_df["flow_kgs"])
+            ax_flow.plot(current_ms, current_flow, "o", color="red",
+                        markersize=14, zorder=5, markeredgecolor="white", markeredgewidth=2)
+            ax_flow.set_xlabel("Time (ms)", fontsize=10, color="darkgreen")
+            ax_flow.set_ylabel("Flow (kg/s)", fontsize=10, color="darkgreen")
+            ax_flow.tick_params(axis='both', labelcolor='darkgreen', labelsize=8)
+            for spine in ['top', 'right']:
+                ax_flow.spines[spine].set_visible(False)
+            for spine in ['bottom', 'left']:
+                ax_flow.spines[spine].set_color('darkgreen')
+            plt.tight_layout()
+            fig_flow.canvas.draw()
+            fw, fh = fig_flow.canvas.get_width_height()
+            flow_rgba = np.frombuffer(fig_flow.canvas.buffer_rgba(),
+                                      dtype=np.uint8).reshape(fh, fw, 4)
+            plt.close(fig_flow)
+            from PIL import Image as PILImage
+            flow_pil = PILImage.fromarray(flow_rgba).resize((w * 2, h), PILImage.LANCZOS)
+            flow_arr = np.array(flow_pil)
+            alpha = flow_arr[:, :, 3:4].astype(float) / 255.0
+            blended = top_row.astype(float) * (1 - alpha * 0.8) + \
+                      flow_arr[:, :, :3].astype(float) * (alpha * 0.8)
+            top_row = blended.clip(0, 255).astype(np.uint8)
+
         bot_row = crop_panel(plot_img, w * 2, h)
         composite = np.vstack([top_row, bot_row])
 
         # Add title bar
-        phase_ms = frame_name.split("_")[-1] if "_" in frame_name else str(fi)
         title_fig, title_ax = plt.subplots(figsize=(16, 0.6))
         title_ax.text(0.5, 0.5, f"{subject_id} — Breathing Phase {phase_ms}ms",
                       ha='center', va='center', fontsize=16, fontweight='bold')
@@ -963,7 +889,7 @@ def generate_highlighted_video(combined_dir, motion_stl_dir, df, output_dir,
         return
 
     w, h = 800, 800
-    region_color_map = {"DescendingAirway": "gray", "LeftNose": "blue", "RightNose": "red"}
+    region_color_map = {"DescendingAirway": "gray", "LeftNose": "blue", "RightNose": "red", "Mouth": "orange"}
 
     # Load face labels for splitting deformed mesh
     face_labels_path = output_dir / f"{subject_id}_full_face_labels.npy"
@@ -974,11 +900,12 @@ def generate_highlighted_video(combined_dir, motion_stl_dir, df, output_dir,
         paths = {}
         if face_labels_hl is not None and len(face_labels_hl) == len(mesh.faces):
             from slicer.septum_refine import extract_submesh
-            for lv, region in {3: "DescendingAirway", 1: "LeftNose", 2: "RightNose"}.items():
+            for lv, region in {0: "Mouth", 3: "DescendingAirway", 1: "LeftNose", 2: "RightNose"}.items():
                 sub = extract_submesh(mesh, face_labels_hl == lv)
-                p = tmp_dir / f"{region}.stl"
-                sub.export(str(p))
-                paths[region] = str(p)
+                if len(sub.faces) > 0:
+                    p = tmp_dir / f"{region}.stl"
+                    sub.export(str(p))
+                    paths[region] = str(p)
         else:
             paths["DescendingAirway"] = str(stl_path)
         return paths
@@ -1190,6 +1117,120 @@ def generate_highlighted_video(combined_dir, motion_stl_dir, df, output_dir,
 
 
 # ---------------------------------------------------------------------------
+# Plane reference PNG (labeled plane indices on STL)
+# ---------------------------------------------------------------------------
+
+def generate_plane_reference(df, output_dir, subject_id):
+    """Generate 3-panel side-by-side plane reference with labeled indices."""
+    import os
+    os.environ['PYVISTA_OFF_SCREEN'] = 'true'
+    import pyvista as pv
+    from PIL import Image
+
+    f0 = df[df['frame_name'] == df['frame_name'].iloc[0]].copy() if 'frame_name' in df.columns else df
+    frames_dir = output_dir / "frames"
+    first_frame = sorted(frames_dir.iterdir())[0] if frames_dir.exists() else None
+    if first_frame is None:
+        log.warning("  No frames found, skipping plane reference")
+        return
+
+    # Airway mesh (refined, colored by region + mouth from face labels)
+    aw_paths = {
+        "DescendingAirway": output_dir / f"{subject_id}_DescendingAirway_refined.stl",
+        "LeftNose": output_dir / f"{subject_id}_LeftNose_refined.stl",
+        "RightNose": output_dir / f"{subject_id}_RightNose_refined.stl",
+    }
+    # Add mouth if face labels exist
+    face_labels_path = output_dir / f"{subject_id}_full_face_labels.npy"
+    surface_dir = output_dir.parent / "surface"
+    if face_labels_path.exists() and (surface_dir / "frame0.stl").exists():
+        fl = np.load(str(face_labels_path))
+        full = trimesh.load_mesh(str(surface_dir / "frame0.stl"))
+        if len(fl) == len(full.faces):
+            from slicer.septum_refine import extract_submesh
+            mouth = extract_submesh(full, fl == 0)
+            mouth_path = output_dir / f"{subject_id}_Mouth_refined.stl"
+            mouth.export(str(mouth_path))
+            aw_paths["Mouth"] = mouth_path
+
+    region_colors = {
+        "DescendingAirway": "gray", "LeftNose": "blue",
+        "RightNose": "red", "Mouth": "orange",
+    }
+    region_configs = [
+        ("DescendingAirway", "Desc", "D", "gray", 3),
+        ("LeftNose", "Left", "L", "blue", 2),
+        ("RightNose", "Right", "R", "red", 2),
+    ]
+
+    panels = []
+    for region, prefix, short, color, interval in region_configs:
+        region_dir = first_frame / f"{region}_Planes"
+        rdf = f0[f0['region'] == region].sort_values('plane_index')
+        if len(rdf) == 0:
+            continue
+
+        plotter = pv.Plotter(off_screen=True, window_size=(1200, 2000))
+        plotter.set_background('white')
+
+        # Airway (all regions, transparent)
+        for r, p in aw_paths.items():
+            if p.exists():
+                plotter.add_mesh(pv.read(str(p)), color=region_colors[r],
+                                opacity=0.08, smooth_shading=True)
+
+        # Region planes
+        if region_dir.exists():
+            for stl_file in sorted(region_dir.glob('*.stl')):
+                plotter.add_mesh(pv.read(str(stl_file)), color=color,
+                                opacity=0.5, show_edges=False)
+
+        # Labels
+        for _, row in rdf.iterrows():
+            pi = row['plane_index']
+            if pi % interval != 0:
+                continue
+            centroid = [row['centroid_x'], row['centroid_y'], row['centroid_z']]
+            plotter.add_point_labels(
+                np.array([centroid]), [f'{short}{pi}'],
+                font_size=16, text_color=color,
+                point_size=0, shape=None, always_visible=True)
+
+        plotter.add_text(region, position='upper_edge', font_size=14, color=color)
+
+        # Sagittal view with camera flip
+        plotter.view_yz()
+        plotter.camera.up = (0, 0, 1)
+        plotter.enable_parallel_projection()
+        plotter.reset_camera()
+        pos = list(plotter.camera_position)
+        pos[0] = (-pos[0][0], pos[0][1], pos[0][2])
+        plotter.camera_position = pos
+        plotter.camera.zoom(0.85)
+
+        img = plotter.screenshot(return_img=True)
+        plotter.close()
+        panels.append(img[:, :, :3])
+
+    if not panels:
+        return
+
+    # Side by side, same height
+    max_h = max(p.shape[0] for p in panels)
+    resized = []
+    for p in panels:
+        pil = Image.fromarray(p)
+        new_w = int(pil.width * max_h / pil.height)
+        pil = pil.resize((new_w, max_h), Image.LANCZOS)
+        resized.append(np.array(pil))
+
+    composite = np.hstack(resized)
+    out_path = output_dir / f"{subject_id}_plane_reference.png"
+    Image.fromarray(composite).save(str(out_path))
+    log.info(f"  Plane reference: {out_path.name}")
+
+
+# ---------------------------------------------------------------------------
 # PDF report (per region)
 # ---------------------------------------------------------------------------
 
@@ -1344,13 +1385,13 @@ def run_postprocessing(output_dir, subject_id):
         log.info("\nGenerating combined plane STLs...")
         combined_dir = generate_combined_plane_stls(frames_dir, output_dir, subject_id)
 
-        log.info("\nGenerating breathing cycle video...")
-        generate_plane_motion_video(combined_dir, motion_stl_dir, output_dir,
-                                    subject_id)
-
         log.info("\nGenerating 4-panel breathing video...")
         generate_4panel_video(combined_dir, motion_stl_dir, df, output_dir,
                               subject_id)
+
+    # Plane reference PNG (labeled plane indices on STL)
+    log.info("\nGenerating plane reference PNG...")
+    generate_plane_reference(df, output_dir, subject_id)
 
     # PDF reports
     log.info("\nGenerating PDF reports...")
