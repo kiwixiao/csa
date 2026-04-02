@@ -279,6 +279,11 @@ def main():
     generate_summary(csv_mutual, summary_path, subject_id, refine_result)
     logger.info(f"  Summary: {summary_path.name}")
 
+    # ── Step 7: Post-processing (per-region analysis + whole-airway visuals) ──
+    logger.info(f"\n--- Step 7: Post-processing ---")
+    from postprocess_bifurcation import run_postprocessing
+    run_postprocessing(output_dir, subject_id)
+
     total_time = time.time() - pipeline_start
     logger.info(f"\n{'='*60}")
     logger.info(f"DONE in {total_time:.1f}s")
