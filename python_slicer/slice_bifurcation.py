@@ -305,13 +305,39 @@ def generate_csa_plot(csv_path, output_path, name):
 
     fig, axes = plt.subplots(2, 1, figsize=(14, 9), sharex=True)
 
+    has_frames = "frame_name" in df_plot.columns
+    first_frame = df_plot["frame_name"].iloc[0] if has_frames else None
+    labeled = set()
+
     for region, grp in df_plot.groupby("region"):
         c = region_colors.get(region, "black")
-        axes[0].plot(grp["arc_length_mm"], grp["area_mm2"],
-                     "-o", color=c, markersize=2, linewidth=1, label=region, alpha=0.8)
-        if "hydraulic_diameter_mm" in grp.columns:
-            axes[1].plot(grp["arc_length_mm"], grp["hydraulic_diameter_mm"],
+
+        if has_frames:
+            # Nose regions: only plot frame 0 (nose doesn't move)
+            # Descending: plot all frames
+            if region in ("LeftNose", "RightNose"):
+                grp = grp[grp["frame_name"] == first_frame]
+
+            for frame, fgrp in grp.groupby("frame_name"):
+                label = region if region not in labeled else None
+                labeled.add(region)
+                fgrp_sorted = fgrp.sort_values("plane_index")
+                axes[0].plot(fgrp_sorted["arc_length_mm"].values, fgrp_sorted["area_mm2"].values,
+                             "-", color=c, linewidth=0.8, alpha=0.5)
+                axes[0].scatter(fgrp_sorted["arc_length_mm"].values, fgrp_sorted["area_mm2"].values,
+                               color=c, s=3, alpha=0.5, label=label)
+                if "hydraulic_diameter_mm" in fgrp_sorted.columns:
+                    axes[1].plot(fgrp_sorted["arc_length_mm"].values, fgrp_sorted["hydraulic_diameter_mm"].values,
+                                 "-", color=c, linewidth=0.8, alpha=0.5)
+                    axes[1].scatter(fgrp_sorted["arc_length_mm"].values, fgrp_sorted["hydraulic_diameter_mm"].values,
+                                   color=c, s=3, alpha=0.5, label=label)
+        else:
+            grp_sorted = grp.sort_values("plane_index")
+            axes[0].plot(grp_sorted["arc_length_mm"], grp_sorted["area_mm2"],
                          "-o", color=c, markersize=2, linewidth=1, label=region, alpha=0.8)
+            if "hydraulic_diameter_mm" in grp_sorted.columns:
+                axes[1].plot(grp_sorted["arc_length_mm"], grp_sorted["hydraulic_diameter_mm"],
+                             "-o", color=c, markersize=2, linewidth=1, label=region, alpha=0.8)
 
     axes[0].set_ylabel("Cross-Sectional Area (mm²)")
     axes[0].set_title(f"{name} — CSA by Region")

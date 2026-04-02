@@ -162,24 +162,27 @@ def main():
     cl_midline_dir = motion_dir / "centerlines" / "midline"
 
     all_frame_rows = []
-    frame_plane_indices = defaultdict(lambda: defaultdict(set))  # region → frame → set of plane_idx
+    frame_plane_indices = defaultdict(lambda: defaultdict(set))
 
     for fi, stl_file in enumerate(stl_files):
-        frame_name = stl_file.stem  # e.g., out_000000
+        frame_name = stl_file.stem
         frame_output = output_dir / "frames" / frame_name
         logger.info(f"\n  Frame {fi+1}/{len(stl_files)}: {frame_name}")
 
-        # Load deformed centerlines
+        # Nose CLs: use frame 0 (nose doesn't move)
+        left_cl = left_cl_f0
+        right_cl = right_cl_f0
+
+        # Check for morphed nose CLs (if morph_nose was True)
         left_cl_file = cl_left_dir / f"{frame_name}.vtk"
         right_cl_file = cl_right_dir / f"{frame_name}.vtk"
+        if left_cl_file.exists():
+            left_cl = read_vtk_centerline(str(left_cl_file))
+        if right_cl_file.exists():
+            right_cl = read_vtk_centerline(str(right_cl_file))
+
+        # Midline CL: always use deformed version (descending airway moves)
         midline_cl_file = cl_midline_dir / f"{frame_name}.vtk"
-
-        if not left_cl_file.exists() or not right_cl_file.exists():
-            logger.warning(f"    Missing centerlines for {frame_name}, skipping")
-            continue
-
-        left_cl = read_vtk_centerline(str(left_cl_file))
-        right_cl = read_vtk_centerline(str(right_cl_file))
         midline_cl = read_vtk_centerline(str(midline_cl_file)) if midline_cl_file.exists() else None
 
         # Slice this frame
