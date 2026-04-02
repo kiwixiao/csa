@@ -590,6 +590,606 @@ def generate_plane_motion_video(combined_dir, motion_stl_dir, output_dir,
 
 
 # ---------------------------------------------------------------------------
+# 4-panel breathing cycle video
+# ---------------------------------------------------------------------------
+
+def _render_pyvista_panel(airway_region_paths=None, airway_mesh_path=None,
+                          plane_mesh_path=None, region_plane_paths=None,
+                          window_size=(800, 800), clip_bounds=None,
+                          view="sagittal", zoom_factor=0.85):
+    """Render a single 3D panel with PyVista. Returns image as numpy array.
+
+    airway_region_paths: dict {"DescendingAirway": path, "LeftNose": path, "RightNose": path}
+        Colors airway surface by region (gray/blue/red).
+    airway_mesh_path: single STL (fallback, rendered as lightblue).
+    plane_mesh_path: single combined plane STL.
+    region_plane_paths: dict of plane STL paths per region.
+    """
+    import os
+    os.environ['PYVISTA_OFF_SCREEN'] = 'true'
+    import pyvista as pv
+
+    pl = pv.Plotter(off_screen=True, window_size=window_size)
+    pl.set_background('white')
+
+    region_color_map = {"DescendingAirway": "gray", "LeftNose": "blue", "RightNose": "red"}
+
+    # Airway surface — colored by region or single color
+    if airway_region_paths:
+        for region, path in airway_region_paths.items():
+            if path and Path(path).exists():
+                aw = pv.read(str(path))
+                if clip_bounds:
+                    aw = aw.clip_box(clip_bounds, invert=False)
+                c = region_color_map.get(region, "lightblue")
+                pl.add_mesh(aw, color=c, opacity=0.15,
+                            smooth_shading=True, show_edges=False)
+    elif airway_mesh_path:
+        aw = pv.read(str(airway_mesh_path))
+        if clip_bounds:
+            aw = aw.clip_box(clip_bounds, invert=False)
+        pl.add_mesh(aw, color='lightblue', opacity=0.15,
+                    smooth_shading=True, show_edges=False)
+
+    # Plane meshes
+    if region_plane_paths:
+        for region, stl_paths in region_plane_paths.items():
+            c = region_color_map.get(region, "gray")
+            for sp in stl_paths:
+                pm = pv.read(str(sp))
+                if clip_bounds:
+                    pm = pm.clip_box(clip_bounds, invert=False)
+                pl.add_mesh(pm, color=c, opacity=0.6, show_edges=False)
+    elif plane_mesh_path:
+        pm = pv.read(str(plane_mesh_path))
+        if clip_bounds:
+            pm = pm.clip_box(clip_bounds, invert=False)
+        centroids = pm.cell_centers().points
+        if len(centroids) > 0:
+            y_vals = centroids[:, 1]
+            pm.cell_data['position'] = y_vals
+            pl.add_mesh(pm, scalars='position', cmap='rainbow',
+                        opacity=0.7, show_edges=False,
+                        show_scalar_bar=False)
+
+    if view == "sagittal":
+        # Look along -X axis (from left side) so nose is on the left
+        pl.view_yz()
+        pl.camera.up = (0, 0, 1)
+        pl.enable_parallel_projection()
+        pl.reset_camera()
+        # Flip camera to other side of X axis
+        pos = list(pl.camera_position)
+        pos[0] = (-pos[0][0], pos[0][1], pos[0][2])
+        pl.camera_position = pos
+        pl.camera.zoom(zoom_factor)
+    elif view == "perspective_45":
+        pl.reset_camera()
+        center = pl.center
+        diag = pl.length
+        pl.camera_position = [
+            (center[0] + diag * 0.5, center[1] - diag * 0.3, center[2] + diag * 0.4),
+            center,
+            (0, 0, 1),
+        ]
+        pl.camera.zoom(zoom_factor)
+
+    img = pl.screenshot(return_img=True)
+    pl.close()
+    return img
+
+
+def generate_4panel_video(combined_dir, motion_stl_dir, df, output_dir,
+                          subject_id, fps=5):
+    """Create professional 4-panel MP4 using PyVista rendering:
+      Top-left:     Full airway STL (45° perspective)
+      Top-right:    STL + CSA planes overlay
+      Bottom-left:  CSA band plot with moving frame line
+      Bottom-right: Zoomed nasopharynx/larynx with STL + planes
+    """
+    import subprocess
+    from PIL import Image
+    import io
+
+    combined_dir = Path(combined_dir)
+    motion_stl_dir = Path(motion_stl_dir)
+
+    plane_files = sorted(combined_dir.glob("*-Planes-All.stl"))
+    if not plane_files:
+        log.warning("  No combined plane STLs, skipping 4-panel video")
+        return
+
+    frames_4p_dir = output_dir / "video_frames_4panel"
+    frames_4p_dir.mkdir(parents=True, exist_ok=True)
+
+    # Pre-compute CSA band per region
+    region_stats = {}
+    region_colors = {"DescendingAirway": "gray", "LeftNose": "blue", "RightNose": "red"}
+    for region in ["DescendingAirway", "LeftNose", "RightNose"]:
+        rdf = df[df["region"] == region]
+        if len(rdf) == 0:
+            continue
+        stats = rdf.groupby("plane_index").agg(
+            area_mean=("area_mm2", "mean"),
+            area_min=("area_mm2", "min"),
+            area_max=("area_mm2", "max"),
+            arc_mean=("arc_length_mm", "mean"),
+        ).reset_index().sort_values("arc_mean")
+        region_stats[region] = stats
+
+    frame_names = sorted(df["frame_name"].unique()) if "frame_name" in df.columns else []
+
+    # Renormalize arc length for display: nose=0, trachea=max (nose-to-trachea left-to-right)
+    arc_max = df["arc_length_mm"].max()
+    for region in region_stats:
+        region_stats[region]["arc_display"] = arc_max - region_stats[region]["arc_mean"]
+
+    # Determine camera positions from first frame
+    airway_stls = sorted(motion_stl_dir.glob("*.stl"))
+    if not airway_stls:
+        log.warning("  No airway STLs, skipping 4-panel video")
+        return
+
+    import os
+    os.environ['PYVISTA_OFF_SCREEN'] = 'true'
+    import pyvista as pv
+
+    ref = pv.read(str(airway_stls[0]))
+    center = ref.center
+    bounds = ref.bounds  # (xmin, xmax, ymin, ymax, zmin, zmax)
+    y_range = bounds[3] - bounds[2]
+    diag = np.linalg.norm(np.array([bounds[1]-bounds[0], bounds[3]-bounds[2], bounds[5]-bounds[4]]))
+
+    # Clip box for zoom: nasopharynx region (upper portion)
+    clip = [bounds[0] - 10, bounds[1] + 10,
+            bounds[2] + y_range * 0.4, bounds[3] + 10,
+            bounds[4] - 10, bounds[5] + 10]
+
+    panel_size = (800, 800)
+
+    # Load face labels for splitting deformed mesh by region
+    face_labels_path = output_dir / f"{subject_id}_full_face_labels.npy"
+    face_labels = np.load(str(face_labels_path)) if face_labels_path.exists() else None
+    # Labels: 0=mouth, 1=left, 2=right, 3=descending
+
+    def _save_region_stls_for_frame(deformed_stl_path, tmp_dir):
+        """Split deformed mesh by face labels, save as temp region STLs."""
+        mesh = trimesh.load_mesh(str(deformed_stl_path))
+        paths = {}
+        if face_labels is not None and len(face_labels) == len(mesh.faces):
+            from slicer.septum_refine import extract_submesh
+            region_map = {3: "DescendingAirway", 1: "LeftNose", 2: "RightNose"}
+            for label_val, region in region_map.items():
+                sub = extract_submesh(mesh, face_labels == label_val)
+                p = tmp_dir / f"{region}.stl"
+                sub.export(str(p))
+                paths[region] = str(p)
+        else:
+            # Fallback: whole mesh as gray
+            paths["DescendingAirway"] = str(deformed_stl_path)
+        return paths
+
+    import tempfile
+    tmp_region_dir = Path(tempfile.mkdtemp())
+
+    log.info(f"  Rendering {len(plane_files)} 4-panel frames (PyVista)...")
+
+    for fi, pfile in enumerate(plane_files):
+        frame_name = pfile.stem.replace("-Planes-All", "")
+        airway_file = motion_stl_dir / f"{frame_name}.stl"
+        aw_stl = str(airway_file) if airway_file.exists() else str(airway_stls[0])
+
+        # Split deformed mesh into colored regions
+        aw_region_paths = _save_region_stls_for_frame(aw_stl, tmp_region_dir)
+
+        # Top-left: Airway only (colored by region), sagittal
+        img_tl = _render_pyvista_panel(
+            airway_region_paths=aw_region_paths,
+            window_size=panel_size, view="sagittal", zoom_factor=0.85)
+
+        # Top-right: Airway (colored) + planes colored by region
+        frame_planes_dir = output_dir / "frames" / frame_name
+        region_plane_paths = {}
+        for region, folder in [("DescendingAirway", "DescendingAirway_Planes"),
+                               ("LeftNose", "LeftNose_Planes"),
+                               ("RightNose", "RightNose_Planes")]:
+            rd = frame_planes_dir / folder
+            if rd.exists():
+                region_plane_paths[region] = sorted(rd.glob("*.stl"))
+        img_tr = _render_pyvista_panel(
+            airway_region_paths=aw_region_paths,
+            region_plane_paths=region_plane_paths,
+            window_size=panel_size, view="sagittal", zoom_factor=0.85)
+
+        # Bottom: Full-width CSA band plot — all 3 regions + current frame
+        w, h = panel_size
+        dpi = 100
+        fig_plot, ax = plt.subplots(figsize=(w * 2 / dpi, h / dpi), dpi=dpi)
+
+        for region, stats in region_stats.items():
+            c = region_colors.get(region, "black")
+            ax.fill_between(stats["arc_display"], stats["area_min"], stats["area_max"],
+                            alpha=0.2, color=c)
+            ax.plot(stats["arc_display"], stats["area_mean"],
+                    "-", color=c, linewidth=1, alpha=0.6, label=f"{region} mean")
+
+            if frame_name in frame_names:
+                frame_rdf = df[(df["region"] == region) & (df["frame_name"] == frame_name)]
+                frame_rdf = frame_rdf.sort_values("arc_length_mm")
+                if len(frame_rdf) > 0:
+                    ax.plot(arc_max - frame_rdf["arc_length_mm"].values,
+                            frame_rdf["area_mm2"].values,
+                            "-", color=c, linewidth=2.5, alpha=0.9)
+
+        ax.set_xlabel("Distance from Nose (mm)", fontsize=11)
+        ax.set_ylabel("CSA (mm²)", fontsize=11)
+        ax.set_title("CSA — All Regions (band = min/max, thick = current frame)",
+                      fontsize=12, fontweight='bold')
+        ax.legend(fontsize=9, loc='upper left')
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+        fig_plot.canvas.draw()
+        plot_img = np.frombuffer(fig_plot.canvas.tostring_rgb(), dtype=np.uint8)
+        plot_img = plot_img.reshape(fig_plot.canvas.get_width_height()[::-1] + (3,))
+        plt.close(fig_plot)
+
+        # Composite: top row [TL | TR], bottom row = full-width plot
+        w, h = panel_size
+        def crop_panel(img, tw, th):
+            img = img[:th, :tw, :3]
+            if img.shape[0] < th or img.shape[1] < tw:
+                padded = np.full((th, tw, 3), 255, dtype=np.uint8)
+                padded[:img.shape[0], :img.shape[1]] = img
+                return padded
+            return img
+
+        top_row = np.hstack([crop_panel(img_tl, w, h), crop_panel(img_tr, w, h)])
+        # Plot already at correct size, just crop
+        bot_row = crop_panel(plot_img, w * 2, h)
+        composite = np.vstack([top_row, bot_row])
+
+        # Add title bar
+        phase_ms = frame_name.split("_")[-1] if "_" in frame_name else str(fi)
+        title_fig, title_ax = plt.subplots(figsize=(16, 0.6))
+        title_ax.text(0.5, 0.5, f"{subject_id} — Breathing Phase {phase_ms}ms",
+                      ha='center', va='center', fontsize=16, fontweight='bold')
+        title_ax.set_axis_off()
+        title_fig.canvas.draw()
+        title_img = np.frombuffer(title_fig.canvas.tostring_rgb(), dtype=np.uint8)
+        title_img = title_img.reshape(title_fig.canvas.get_width_height()[::-1] + (3,))
+        plt.close(title_fig)
+        title_pil = Image.fromarray(title_img).resize((w * 2, 40), Image.LANCZOS)
+        title_resized = np.array(title_pil)
+
+        final = np.vstack([title_resized, composite])
+
+        # Save frame
+        out_frame = frames_4p_dir / f"frame_{fi:04d}.png"
+        Image.fromarray(final).save(str(out_frame))
+
+        if (fi + 1) % 5 == 0 or fi == len(plane_files) - 1:
+            log.info(f"    Frame {fi+1}/{len(plane_files)}")
+
+    # Encode to MP4
+    video_path = output_dir / f"{subject_id}_4panel_breathing.mp4"
+    frame_pattern = str(frames_4p_dir / "frame_%04d.png")
+    cmd = [
+        "ffmpeg", "-y",
+        "-framerate", str(fps),
+        "-i", frame_pattern,
+        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-crf", "20", "-preset", "medium",
+        str(video_path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            log.info(f"  4-panel video: {video_path.name}")
+        else:
+            log.warning(f"  ffmpeg failed: {result.stderr[:200]}")
+    except FileNotFoundError:
+        log.warning("  ffmpeg not found, skipping video encoding")
+
+
+# ---------------------------------------------------------------------------
+# Highlighted-planes 4-panel video (custom plane selection)
+# ---------------------------------------------------------------------------
+
+def generate_highlighted_video(combined_dir, motion_stl_dir, df, output_dir,
+                               subject_id, highlight_planes, fps=5):
+    """Create 4-panel video with specific planes highlighted.
+
+    Args:
+        highlight_planes: dict like {"DescendingAirway": [46, 66, 76], "LeftNose": [20]}
+            Planes to highlight in red/yellow on the STL + vertical lines on CSA plot.
+    """
+    import subprocess
+    from PIL import Image
+
+    combined_dir = Path(combined_dir)
+    motion_stl_dir = Path(motion_stl_dir)
+
+    plane_files = sorted(combined_dir.glob("*-Planes-All.stl"))
+    if not plane_files:
+        log.warning("  No combined plane STLs, skipping highlighted video")
+        return
+
+    frames_hl_dir = output_dir / "video_frames_highlighted"
+    frames_hl_dir.mkdir(parents=True, exist_ok=True)
+
+    # Pre-compute CSA band per region
+    region_stats = {}
+    region_colors_plot = {"DescendingAirway": "gray", "LeftNose": "blue", "RightNose": "red"}
+    for region in ["DescendingAirway", "LeftNose", "RightNose"]:
+        rdf = df[df["region"] == region]
+        if len(rdf) == 0:
+            continue
+        stats = rdf.groupby("plane_index").agg(
+            area_mean=("area_mm2", "mean"),
+            area_min=("area_mm2", "min"),
+            area_max=("area_mm2", "max"),
+            arc_mean=("arc_length_mm", "mean"),
+        ).reset_index().sort_values("arc_mean")
+        region_stats[region] = stats
+
+    frame_names = sorted(df["frame_name"].unique()) if "frame_name" in df.columns else []
+
+    # Renormalize arc length for display
+    arc_max = df["arc_length_mm"].max()
+    for region in region_stats:
+        region_stats[region]["arc_display"] = arc_max - region_stats[region]["arc_mean"]
+
+    # Build highlight arc lengths for vertical lines (in display coords)
+    highlight_arcs = {}
+    for region, indices in highlight_planes.items():
+        rdf = df[df["region"] == region]
+        for pi in indices:
+            arc_raw = rdf[rdf["plane_index"] == pi]["arc_length_mm"].mean()
+            arc_disp = arc_max - arc_raw
+            label = {"DescendingAirway": "D", "LeftNose": "L", "RightNose": "R"}.get(region, "")
+            highlight_arcs[f"{label}{pi}"] = arc_disp
+
+    # Collect highlight plane STL paths per frame for PyVista rendering
+    frames_base = output_dir / "frames"
+
+    import os
+    os.environ['PYVISTA_OFF_SCREEN'] = 'true'
+    import pyvista as pv
+
+    airway_stls = sorted(motion_stl_dir.glob("*.stl"))
+    if not airway_stls:
+        return
+
+    w, h = 800, 800
+    region_color_map = {"DescendingAirway": "gray", "LeftNose": "blue", "RightNose": "red"}
+
+    # Load face labels for splitting deformed mesh
+    face_labels_path = output_dir / f"{subject_id}_full_face_labels.npy"
+    face_labels_hl = np.load(str(face_labels_path)) if face_labels_path.exists() else None
+
+    def _split_deformed(stl_path, tmp_dir):
+        mesh = trimesh.load_mesh(str(stl_path))
+        paths = {}
+        if face_labels_hl is not None and len(face_labels_hl) == len(mesh.faces):
+            from slicer.septum_refine import extract_submesh
+            for lv, region in {3: "DescendingAirway", 1: "LeftNose", 2: "RightNose"}.items():
+                sub = extract_submesh(mesh, face_labels_hl == lv)
+                p = tmp_dir / f"{region}.stl"
+                sub.export(str(p))
+                paths[region] = str(p)
+        else:
+            paths["DescendingAirway"] = str(stl_path)
+        return paths
+
+    import tempfile
+    tmp_hl_dir = Path(tempfile.mkdtemp())
+
+    log.info(f"  Rendering {len(plane_files)} highlighted frames...")
+
+    for fi, pfile in enumerate(plane_files):
+        frame_name = pfile.stem.replace("-Planes-All", "")
+        frame_dir = frames_base / frame_name
+        airway_file = motion_stl_dir / f"{frame_name}.stl"
+        aw_stl = str(airway_file) if airway_file.exists() else str(airway_stls[0])
+
+        # Split deformed mesh by region
+        aw_region_paths = _split_deformed(aw_stl, tmp_hl_dir)
+
+        # --- Top-left: Airway (colored, moving) + highlighted planes only ---
+        pl1 = pv.Plotter(off_screen=True, window_size=(w, h))
+        pl1.set_background('white')
+        for region, path in aw_region_paths.items():
+            pl1.add_mesh(pv.read(str(path)), color=region_color_map[region],
+                        opacity=0.12, smooth_shading=True)
+
+        # Add highlighted planes in bright colors with labels
+        hl_colors = ['red', 'yellow', 'lime', 'cyan', 'magenta', 'orange']
+        short_prefix = {"DescendingAirway": "D", "LeftNose": "L", "RightNose": "R"}
+        ci = 0
+        for region, indices in highlight_planes.items():
+            prefix = {"DescendingAirway": "Desc", "LeftNose": "Left", "RightNose": "Right"}[region]
+            region_plane_dir = frame_dir / f"{region}_Planes"
+            if not region_plane_dir.exists():
+                continue
+            rdf = df[(df["region"] == region) & (df["frame_name"] == frame_name)].sort_values("plane_index")
+            plane_to_seq = {pi: si for si, pi in enumerate(rdf["plane_index"])}
+
+            for pi in indices:
+                seq = plane_to_seq.get(pi)
+                if seq is None:
+                    continue
+                stl_file = region_plane_dir / f"{frame_name}-{prefix}-{seq:03d}.stl"
+                if stl_file.exists():
+                    mesh = pv.read(str(stl_file))
+                    color = hl_colors[ci % len(hl_colors)]
+                    pl1.add_mesh(mesh, color=color,
+                                opacity=0.9, show_edges=True, edge_color='black', line_width=1)
+                    # Label at centroid
+                    row = rdf[rdf["plane_index"] == pi]
+                    if len(row) > 0:
+                        centroid = row[["centroid_x", "centroid_y", "centroid_z"]].values[0]
+                        label = f"{short_prefix.get(region, '')}{pi}"
+                        pl1.add_point_labels(
+                            np.array([centroid]), [label],
+                            font_size=20, text_color=color,
+                            point_size=0, shape=None,
+                            always_visible=True)
+                ci += 1
+
+        pl1.view_yz(); pl1.camera.up = (0, 0, 1)
+        pl1.enable_parallel_projection(); pl1.reset_camera()
+        pos = list(pl1.camera_position)
+        pos[0] = (-pos[0][0], pos[0][1], pos[0][2])
+        pl1.camera_position = pos
+        pl1.camera.zoom(0.85)
+        img_tl = pl1.screenshot(return_img=True); pl1.close()
+
+        # --- Top-right: Airway (colored, moving) + all planes + highlighted ---
+        pl2 = pv.Plotter(off_screen=True, window_size=(w, h))
+        pl2.set_background('white')
+        for region, path in aw_region_paths.items():
+            pl2.add_mesh(pv.read(str(path)), color=region_color_map[region],
+                        opacity=0.08, smooth_shading=True)
+
+        # All planes (subdued)
+        all_pm = pv.read(str(pfile))
+        pl2.add_mesh(all_pm, color='gray', opacity=0.2, show_edges=False)
+
+        # Highlighted planes (bright) with labels
+        ci = 0
+        for region, indices in highlight_planes.items():
+            prefix = {"DescendingAirway": "Desc", "LeftNose": "Left", "RightNose": "Right"}[region]
+            region_plane_dir = frame_dir / f"{region}_Planes"
+            if not region_plane_dir.exists():
+                continue
+            rdf = df[(df["region"] == region) & (df["frame_name"] == frame_name)].sort_values("plane_index")
+            plane_to_seq = {pi: si for si, pi in enumerate(rdf["plane_index"])}
+
+            for pi in indices:
+                seq = plane_to_seq.get(pi)
+                if seq is None:
+                    continue
+                stl_file = region_plane_dir / f"{frame_name}-{prefix}-{seq:03d}.stl"
+                if stl_file.exists():
+                    mesh = pv.read(str(stl_file))
+                    color = hl_colors[ci % len(hl_colors)]
+                    pl2.add_mesh(mesh, color=color,
+                                opacity=0.9, show_edges=True, edge_color='black', line_width=1)
+                    row = rdf[rdf["plane_index"] == pi]
+                    if len(row) > 0:
+                        centroid = row[["centroid_x", "centroid_y", "centroid_z"]].values[0]
+                        label = f"{short_prefix.get(region, '')}{pi}"
+                        pl2.add_point_labels(
+                            np.array([centroid]), [label],
+                            font_size=20, text_color=color,
+                            point_size=0, shape=None,
+                            always_visible=True)
+                ci += 1
+
+        pl2.view_yz(); pl2.camera.up = (0, 0, 1)
+        pl2.enable_parallel_projection(); pl2.reset_camera()
+        pos = list(pl2.camera_position)
+        pos[0] = (-pos[0][0], pos[0][1], pos[0][2])
+        pl2.camera_position = pos
+        pl2.camera.zoom(0.85)
+        img_tr = pl2.screenshot(return_img=True); pl2.close()
+
+        # --- Bottom: CSA plot with highlight vertical lines ---
+        dpi = 100
+        fig_plot, ax = plt.subplots(figsize=(w * 2 / dpi, h / dpi), dpi=dpi)
+
+        for region, stats in region_stats.items():
+            c = region_colors_plot.get(region, "black")
+            ax.fill_between(stats["arc_display"], stats["area_min"], stats["area_max"],
+                            alpha=0.2, color=c)
+            ax.plot(stats["arc_display"], stats["area_mean"],
+                    "-", color=c, linewidth=1, alpha=0.6)
+
+            if frame_name in frame_names:
+                frame_rdf = df[(df["region"] == region) & (df["frame_name"] == frame_name)]
+                frame_rdf = frame_rdf.sort_values("arc_length_mm")
+                if len(frame_rdf) > 0:
+                    ax.plot(arc_max - frame_rdf["arc_length_mm"].values,
+                            frame_rdf["area_mm2"].values,
+                            "-", color=c, linewidth=2.5, alpha=0.9)
+
+        # Vertical lines for highlighted planes (already in display coords)
+        ci = 0
+        for label, arc_disp in highlight_arcs.items():
+            ax.axvline(x=arc_disp, color=hl_colors[ci % len(hl_colors)],
+                       linewidth=2, linestyle="--", alpha=0.8)
+            ax.text(arc_disp, ax.get_ylim()[1] * 0.95, f" {label}",
+                    color=hl_colors[ci % len(hl_colors)],
+                    fontsize=11, fontweight='bold', va='top')
+            ci += 1
+
+        ax.set_xlabel("Distance from Nose (mm)", fontsize=11)
+        ax.set_ylabel("CSA (mm²)", fontsize=11)
+        ax.set_title("CSA — Highlighted Planes", fontsize=12, fontweight='bold')
+        ax.grid(True, alpha=0.3)
+        plt.tight_layout()
+
+        fig_plot.canvas.draw()
+        plot_img = np.frombuffer(fig_plot.canvas.tostring_rgb(), dtype=np.uint8)
+        plot_img = plot_img.reshape(fig_plot.canvas.get_width_height()[::-1] + (3,))
+        plt.close(fig_plot)
+
+        # Composite
+        def crop_panel(img, tw, th):
+            img = img[:th, :tw, :3]
+            if img.shape[0] < th or img.shape[1] < tw:
+                padded = np.full((th, tw, 3), 255, dtype=np.uint8)
+                padded[:img.shape[0], :img.shape[1]] = img
+                return padded
+            return img
+
+        top_row = np.hstack([crop_panel(img_tl, w, h), crop_panel(img_tr, w, h)])
+        bot_row = crop_panel(plot_img, w * 2, h)
+        composite = np.vstack([top_row, bot_row])
+
+        # Title bar
+        phase_ms = frame_name.split("_")[-1] if "_" in frame_name else str(fi)
+        hl_str = ", ".join(highlight_arcs.keys())
+        title_fig, title_ax = plt.subplots(figsize=(16, 0.6))
+        title_ax.text(0.5, 0.5, f"{subject_id} — Phase {phase_ms}ms — Planes: {hl_str}",
+                      ha='center', va='center', fontsize=16, fontweight='bold')
+        title_ax.set_axis_off()
+        title_fig.canvas.draw()
+        title_img = np.frombuffer(title_fig.canvas.tostring_rgb(), dtype=np.uint8)
+        title_img = title_img.reshape(title_fig.canvas.get_width_height()[::-1] + (3,))
+        plt.close(title_fig)
+        title_pil = Image.fromarray(title_img).resize((w * 2, 40), Image.LANCZOS)
+        final = np.vstack([np.array(title_pil)[:, :, :3], composite])
+
+        out_frame = frames_hl_dir / f"frame_{fi:04d}.png"
+        Image.fromarray(final).save(str(out_frame))
+
+        if (fi + 1) % 5 == 0 or fi == len(plane_files) - 1:
+            log.info(f"    Frame {fi+1}/{len(plane_files)}")
+
+    # Encode
+    hl_tag = "_".join(f"{k}" for k in highlight_arcs.keys())
+    video_path = output_dir / f"{subject_id}_highlighted_{hl_tag}.mp4"
+    cmd = [
+        "ffmpeg", "-y", "-framerate", str(fps),
+        "-i", str(frames_hl_dir / "frame_%04d.png"),
+        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-crf", "20", "-preset", "medium", str(video_path),
+    ]
+    try:
+        result = subprocess.run(cmd, capture_output=True, text=True)
+        if result.returncode == 0:
+            log.info(f"  Highlighted video: {video_path.name}")
+        else:
+            log.warning(f"  ffmpeg failed: {result.stderr[:200]}")
+    except FileNotFoundError:
+        log.warning("  ffmpeg not found")
+
+
+# ---------------------------------------------------------------------------
 # PDF report (per region)
 # ---------------------------------------------------------------------------
 
@@ -747,6 +1347,10 @@ def run_postprocessing(output_dir, subject_id):
         log.info("\nGenerating breathing cycle video...")
         generate_plane_motion_video(combined_dir, motion_stl_dir, output_dir,
                                     subject_id)
+
+        log.info("\nGenerating 4-panel breathing video...")
+        generate_4panel_video(combined_dir, motion_stl_dir, df, output_dir,
+                              subject_id)
 
     # PDF reports
     log.info("\nGenerating PDF reports...")

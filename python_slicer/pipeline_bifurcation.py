@@ -117,7 +117,10 @@ def main():
     # Also save midline CL to branches/ so interpolation can find it
     save_centerline_vtk(refine_result["merged_centerline"],
                         branches_dir / f"{subject_id}_Trachea_to_NoseMidline_centerline.vtk")
-    logger.info(f"  Saved refined meshes + merged centerline (also in branches/)")
+    # Save face labels for video rendering (split deformed mesh by region)
+    np.save(str(output_dir / f"{subject_id}_full_face_labels.npy"),
+            refine_result["_full_face_labels"])
+    logger.info(f"  Saved refined meshes + merged centerline + face labels")
 
     # ── Step 2: Generate deformed frames ────────────────────
     motion_dir = subject_dir / "motion"
