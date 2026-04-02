@@ -381,6 +381,228 @@ def save_centerline_vtk(points, filepath):
 
 
 # ---------------------------------------------------------------------------
+# Single-frame slicing (callable from multi-frame pipeline)
+# ---------------------------------------------------------------------------
+
+def run_single_frame(
+    stl_path,
+    output_dir,
+    name,
+    refine_result,
+    left_cl,
+    right_cl,
+    midline_cl=None,
+    log=None,
+):
+    """Slice a single frame using pre-computed septum refinement.
+
+    This is the core slicing function called by pipeline_bifurcation.py
+    for each of the 21 deformed frames. The refine_result (face labels,
+    septum, meshes) is computed once on frame 0 and reused here.
+
+    For deformed frames: the STL has same topology as frame 0, so face
+    labels from frame 0 apply directly. Centerlines are deformed versions.
+
+    Args:
+        stl_path: Path to deformed full airway STL
+        output_dir: Where to save per-region plane STLs + CSV
+        name: Prefix for output files
+        refine_result: Dict from refine_nasal_partition() on frame 0
+        left_cl: Deformed left nose centerline (Nx3)
+        right_cl: Deformed right nose centerline (Nx3)
+        midline_cl: Deformed merged midline centerline (Nx3), optional
+        log: Logger instance
+
+    Returns:
+        dict with per-region results: {region: [(plane_idx, area, perimeter, ...)]}
+    """
+    import trimesh
+    if log is None:
+        log = logging.getLogger(__name__)
+
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    full_mesh = read_stl(str(stl_path))
+
+    from slicer.septum_refine import (
+        extract_submesh, _smooth_centerline,
+        find_divergence_index, build_matched_curves,
+    )
+
+    # Extract deformed region meshes using FACE INDICES from frame 0.
+    # FFD preserves topology: same face count, same face order, just moved vertices.
+    # No vertex matching needed — face indices transfer directly.
+    full_face_labels = refine_result.get("_full_face_labels")
+    if full_face_labels is not None and len(full_face_labels) == len(full_mesh.faces):
+        # Labels: 0=mouth, 1=left, 2=right, 3=descending
+        left_mesh = extract_submesh(full_mesh, full_face_labels == 1)
+        right_mesh = extract_submesh(full_mesh, full_face_labels == 2)
+        desc_mesh = extract_submesh(full_mesh, full_face_labels == 3)
+        no_mouth_mask = full_face_labels > 0  # everything except mouth
+        no_mouth_mesh = extract_submesh(full_mesh, no_mouth_mask)
+    else:
+        # Fallback: use refine_result meshes (frame 0 only)
+        left_mesh = refine_result["left_mesh"]
+        right_mesh = refine_result["right_mesh"]
+        desc_mesh = refine_result["desc_mesh"]
+        no_mouth_mesh = trimesh.util.concatenate([left_mesh, right_mesh, desc_mesh])
+
+    septum_pos = refine_result["septum_pos"]
+    septum_normal = refine_result["septum_normal"]
+
+    # Build midline if not provided
+    if midline_cl is None:
+        diverge_idx = find_divergence_index(left_cl, right_cl)
+        left_matched, right_matched, midline_avg, _ = build_matched_curves(
+            left_cl, right_cl, diverge_idx)
+        midline_cl_full = np.vstack([
+            (left_cl[:diverge_idx] + right_cl[:diverge_idx]) / 2.0,
+            midline_avg[1:]
+        ])
+        midline_cl = _smooth_centerline(midline_cl_full)
+
+    # Truncate midline at septum + resample to 2mm
+    dists_to_septum = np.linalg.norm(midline_cl - septum_pos, axis=1)
+    septum_cl_idx = int(np.argmin(dists_to_septum))
+    desc_cl_raw = midline_cl[:septum_cl_idx]
+
+    from scipy.interpolate import interp1d as scipy_interp1d
+    arc = compute_arc_length(desc_cl_raw)
+    total_len = arc[-1] if len(arc) > 0 else 0
+    if total_len > 0:
+        n_resampled = max(int(total_len / 2.0), 10)
+        t_uniform = np.linspace(0, total_len, n_resampled)
+        desc_cl = scipy_interp1d(arc, desc_cl_raw, axis=0, kind='cubic')(t_uniform)
+    else:
+        desc_cl = desc_cl_raw
+
+    # Create output dirs
+    for d in ["DescendingAirway_Planes", "LeftNose_Planes", "RightNose_Planes"]:
+        (output_dir / d).mkdir(parents=True, exist_ok=True)
+
+    all_rows = []
+
+    # ── Slice descending ──
+    no_mouth_combined = trimesh.util.concatenate([left_mesh, right_mesh, desc_mesh])
+    desc_results = slice_along_centerline(
+        no_mouth_combined, desc_cl, None, log, label_prefix="Desc ")
+
+    desc_positions = np.array([pos for _, pos, _ in desc_results])
+    desc_arc = compute_arc_length(desc_positions) if len(desc_positions) > 0 else np.array([])
+    desc_count = 0
+
+    for k, (plane_idx, pos, loops) in enumerate(desc_results):
+        arc_len = float(desc_arc[k]) if k < len(desc_arc) else 0.0
+        merged = merge_loops(loops)
+        if merged is None:
+            continue
+        stl_path_out = output_dir / "DescendingAirway_Planes" / f"{name}-Desc-{desc_count:03d}.stl"
+        write_cross_section_stl(str(stl_path_out), merged.vertices, merged.faces)
+        desc_count += 1
+
+        hyd_diam = DiameterCalculator.compute_hydraulic_diameter(merged.area, merged.perimeter)
+        equiv_diam = DiameterCalculator.compute_equivalent_diameter(merged.area)
+        all_rows.append({
+            "plane_index": plane_idx, "region": "DescendingAirway",
+            "arc_length_mm": arc_len, "arc_length_branch_mm": arc_len,
+            "area_mm2": merged.area, "perimeter_mm": merged.perimeter,
+            "hydraulic_diameter_mm": hyd_diam, "equivalent_diameter_mm": equiv_diam,
+            "centroid_x": merged.centroid[0], "centroid_y": merged.centroid[1],
+            "centroid_z": merged.centroid[2],
+            "centerline_source": "nasal_midline", "is_valid": True,
+        })
+
+    # Arc offset at divergence
+    diverge_idx = refine_result["diverge_idx"]
+    trunk_portion = midline_cl[:diverge_idx + 1] if diverge_idx < len(midline_cl) else midline_cl
+    arc_offset = compute_arc_length(trunk_portion)[-1] if len(trunk_portion) > 1 else 0.0
+
+    # ── Slice left nose ──
+    left_seg = left_cl[diverge_idx:]
+    left_seg_arc = compute_arc_length(left_seg)
+    left_results = slice_along_midline(left_mesh, left_seg, log, label_prefix="Left ")
+    left_count = 0
+
+    for k, (plane_idx, pos, normal, loop_data) in enumerate(left_results):
+        branch_arc = float(left_seg_arc[plane_idx]) if plane_idx < len(left_seg_arc) else 0.0
+        arc_len = arc_offset + branch_arc
+        total_area = sum(L["area"] for L in loop_data)
+        total_perimeter = sum(L["perimeter"] for L in loop_data)
+        if len(loop_data) == 1:
+            mc = loop_data[0]["centroid"]
+        else:
+            cs = np.array([L["centroid"] for L in loop_data])
+            ar = np.array([L["area"] for L in loop_data])
+            mc = np.average(cs, axis=0, weights=ar)
+
+        stl_out = output_dir / "LeftNose_Planes" / f"{name}-Left-{left_count:03d}.stl"
+        _save_loops_stl(loop_data, str(stl_out))
+        left_count += 1
+
+        hyd_diam = DiameterCalculator.compute_hydraulic_diameter(total_area, total_perimeter)
+        equiv_diam = DiameterCalculator.compute_equivalent_diameter(total_area)
+        all_rows.append({
+            "plane_index": plane_idx, "region": "LeftNose",
+            "arc_length_mm": arc_len, "arc_length_branch_mm": branch_arc,
+            "area_mm2": total_area, "perimeter_mm": total_perimeter,
+            "hydraulic_diameter_mm": hyd_diam, "equivalent_diameter_mm": equiv_diam,
+            "centroid_x": mc[0], "centroid_y": mc[1], "centroid_z": mc[2],
+            "centerline_source": "left_nose", "is_valid": True,
+        })
+
+    # ── Slice right nose ──
+    right_seg = right_cl[diverge_idx:]
+    right_seg_arc = compute_arc_length(right_seg)
+    right_results = slice_along_midline(right_mesh, right_seg, log, label_prefix="Right ")
+    right_count = 0
+
+    for k, (plane_idx, pos, normal, loop_data) in enumerate(right_results):
+        branch_arc = float(right_seg_arc[plane_idx]) if plane_idx < len(right_seg_arc) else 0.0
+        arc_len = arc_offset + branch_arc
+        total_area = sum(L["area"] for L in loop_data)
+        total_perimeter = sum(L["perimeter"] for L in loop_data)
+        if len(loop_data) == 1:
+            mc = loop_data[0]["centroid"]
+        else:
+            cs = np.array([L["centroid"] for L in loop_data])
+            ar = np.array([L["area"] for L in loop_data])
+            mc = np.average(cs, axis=0, weights=ar)
+
+        stl_out = output_dir / "RightNose_Planes" / f"{name}-Right-{right_count:03d}.stl"
+        _save_loops_stl(loop_data, str(stl_out))
+        right_count += 1
+
+        hyd_diam = DiameterCalculator.compute_hydraulic_diameter(total_area, total_perimeter)
+        equiv_diam = DiameterCalculator.compute_equivalent_diameter(total_area)
+        all_rows.append({
+            "plane_index": plane_idx, "region": "RightNose",
+            "arc_length_mm": arc_len, "arc_length_branch_mm": branch_arc,
+            "area_mm2": total_area, "perimeter_mm": total_perimeter,
+            "hydraulic_diameter_mm": hyd_diam, "equivalent_diameter_mm": equiv_diam,
+            "centroid_x": mc[0], "centroid_y": mc[1], "centroid_z": mc[2],
+            "centerline_source": "right_nose", "is_valid": True,
+        })
+
+    log.info(f"  Frame {name}: Desc={desc_count}, Left={left_count}, Right={right_count}")
+    return all_rows
+
+
+def _save_loops_stl(loop_data, stl_path):
+    """Save loop data as properly triangulated STL."""
+    all_verts, all_faces = [], []
+    offset = 0
+    for L in loop_data:
+        if "faces" in L and len(L["vertices"]) >= 3:
+            all_verts.append(L["vertices"])
+            all_faces.append(L["faces"] + offset)
+            offset += len(L["vertices"])
+    if all_verts:
+        write_cross_section_stl(stl_path,
+            np.vstack(all_verts), np.vstack(all_faces))
+
+
+# ---------------------------------------------------------------------------
 # Main pipeline
 # ---------------------------------------------------------------------------
 

@@ -496,6 +496,46 @@ def refine_nasal_partition(
     log.info(f"Merged centerline: {len(merged_cl)} pts, "
              f"arc length {_arc_length_param(merged_cl)[-1]:.1f}mm (smoothed)")
 
+    # Step 10: Build full-mesh face labels for multi-frame reuse
+    # Maps every face in the ORIGINAL full mesh to a region label:
+    #   0 = Mouth, 1 = LeftNose, 2 = RightNose, 3 = DescendingAirway
+    # FFD preserves topology, so these face indices apply to all deformed frames.
+    full_face_labels = np.zeros(len(full_mesh.faces), dtype=int)  # 0 = mouth by default
+
+    if mouth_mesh is not None:
+        # Find which full mesh faces are NOT mouth (= no-mouth faces)
+        # We used _remove_faces_by_vertex_matching which keeps faces where
+        # NOT all 3 vertices match mouth. We need the keep_mask.
+        mouth_tree = cKDTree(mouth_mesh.vertices)
+        dists, _ = mouth_tree.query(full_mesh.vertices)
+        is_mouth_vertex = dists < 0.01
+        face_all_mouth = np.all(is_mouth_vertex[full_mesh.faces], axis=1)
+        no_mouth_mask = ~face_all_mouth
+    else:
+        no_mouth_mask = np.ones(len(full_mesh.faces), dtype=bool)
+
+    # Map no-mouth face labels (0=desc, 1=left, 2=right) back to full mesh
+    no_mouth_indices = np.where(no_mouth_mask)[0]
+    if len(no_mouth_indices) == len(face_labels):
+        for i, full_idx in enumerate(no_mouth_indices):
+            if face_labels[i] == 1:
+                full_face_labels[full_idx] = 1  # LeftNose
+            elif face_labels[i] == 2:
+                full_face_labels[full_idx] = 2  # RightNose
+            else:
+                full_face_labels[full_idx] = 3  # DescendingAirway
+    else:
+        log.warning(f"Face label count mismatch: {len(no_mouth_indices)} vs {len(face_labels)}. "
+                    f"Full-mesh labels may be incorrect.")
+        # Best effort: label all non-mouth as descending
+        full_face_labels[no_mouth_mask] = 3
+
+    n_mouth = (full_face_labels == 0).sum()
+    n_left = (full_face_labels == 1).sum()
+    n_right = (full_face_labels == 2).sum()
+    n_desc = (full_face_labels == 3).sum()
+    log.info(f"Full-mesh labels: Mouth={n_mouth}, Left={n_left}, Right={n_right}, Desc={n_desc}")
+
     log.info("=== Septum refinement complete ===")
 
     return {
@@ -511,4 +551,9 @@ def refine_nasal_partition(
         "left_matched": left_matched,
         "right_matched": right_matched,
         "diverge_idx": diverge_idx,
+        # For multi-frame reuse
+        "_face_labels": face_labels,         # on no-mouth mesh
+        "_full_face_labels": full_face_labels, # on original full mesh (0=mouth,1=L,2=R,3=D)
+        "_mouth_mesh": mouth_mesh,
+        "_no_mouth_mesh": no_mouth,
     }
