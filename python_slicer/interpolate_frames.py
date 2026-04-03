@@ -255,9 +255,11 @@ def generate_motion_frames(
         raise RuntimeError("MIRTK not found. Install MIRTK and ensure 'mirtk' is in PATH.")
 
     # ── Deform surface STL ──────────────────────────────────
-    frame0_stl = subject_dir / "surface" / "frame0.stl"
-    if not frame0_stl.exists():
-        raise FileNotFoundError(f"frame0.stl not found: {frame0_stl}")
+    # Find the single STL in surface/ (any name)
+    surface_stls = list((subject_dir / "surface").glob("*.stl"))
+    if not surface_stls:
+        raise FileNotFoundError(f"No STL found in {subject_dir / 'surface'}")
+    frame0_stl = surface_stls[0]
 
     stl_out_dir = motion_dir / "stl"
     stl_out_dir.mkdir(parents=True, exist_ok=True)

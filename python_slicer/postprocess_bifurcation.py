@@ -725,8 +725,7 @@ def generate_4panel_video(combined_dir, motion_stl_dir, df, output_dir,
         plt.tight_layout()
 
         fig_plot.canvas.draw()
-        plot_img = np.frombuffer(fig_plot.canvas.tostring_rgb(), dtype=np.uint8)
-        plot_img = plot_img.reshape(fig_plot.canvas.get_width_height()[::-1] + (3,))
+        plot_img = np.array(fig_plot.canvas.buffer_rgba())[:, :, :3]
         plt.close(fig_plot)
 
         # Composite
@@ -782,8 +781,7 @@ def generate_4panel_video(combined_dir, motion_stl_dir, df, output_dir,
                       ha='center', va='center', fontsize=16, fontweight='bold')
         title_ax.set_axis_off()
         title_fig.canvas.draw()
-        title_img = np.frombuffer(title_fig.canvas.tostring_rgb(), dtype=np.uint8)
-        title_img = title_img.reshape(title_fig.canvas.get_width_height()[::-1] + (3,))
+        title_img = np.array(title_fig.canvas.buffer_rgba())[:, :, :3]
         plt.close(title_fig)
         title_pil = Image.fromarray(title_img).resize((w * 2, 40), Image.LANCZOS)
         title_resized = np.array(title_pil)
@@ -1059,8 +1057,7 @@ def generate_highlighted_video(combined_dir, motion_stl_dir, df, output_dir,
         plt.tight_layout()
 
         fig_plot.canvas.draw()
-        plot_img = np.frombuffer(fig_plot.canvas.tostring_rgb(), dtype=np.uint8)
-        plot_img = plot_img.reshape(fig_plot.canvas.get_width_height()[::-1] + (3,))
+        plot_img = np.array(fig_plot.canvas.buffer_rgba())[:, :, :3]
         plt.close(fig_plot)
 
         # Composite
@@ -1084,8 +1081,7 @@ def generate_highlighted_video(combined_dir, motion_stl_dir, df, output_dir,
                       ha='center', va='center', fontsize=16, fontweight='bold')
         title_ax.set_axis_off()
         title_fig.canvas.draw()
-        title_img = np.frombuffer(title_fig.canvas.tostring_rgb(), dtype=np.uint8)
-        title_img = title_img.reshape(title_fig.canvas.get_width_height()[::-1] + (3,))
+        title_img = np.array(title_fig.canvas.buffer_rgba())[:, :, :3]
         plt.close(title_fig)
         title_pil = Image.fromarray(title_img).resize((w * 2, 40), Image.LANCZOS)
         final = np.vstack([np.array(title_pil)[:, :, :3], composite])
@@ -1143,9 +1139,10 @@ def generate_plane_reference(df, output_dir, subject_id):
     # Add mouth if face labels exist
     face_labels_path = output_dir / f"{subject_id}_full_face_labels.npy"
     surface_dir = output_dir.parent / "surface"
-    if face_labels_path.exists() and (surface_dir / "frame0.stl").exists():
+    surface_stls = list(surface_dir.glob("*.stl")) if surface_dir.exists() else []
+    if face_labels_path.exists() and surface_stls:
         fl = np.load(str(face_labels_path))
-        full = trimesh.load_mesh(str(surface_dir / "frame0.stl"))
+        full = trimesh.load_mesh(str(surface_stls[0]))
         if len(fl) == len(full.faces):
             from slicer.septum_refine import extract_submesh
             mouth = extract_submesh(full, fl == 0)

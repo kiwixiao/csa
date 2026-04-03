@@ -36,6 +36,17 @@ from interpolate_frames import generate_motion_frames
 log = logging.getLogger(__name__)
 
 
+def find_surface_stl(subject_dir):
+    """Find the single STL file in surface/ folder (any name)."""
+    surface_dir = Path(subject_dir) / "surface"
+    stl_files = list(surface_dir.glob("*.stl"))
+    if not stl_files:
+        raise FileNotFoundError(f"No STL found in {surface_dir}")
+    if len(stl_files) > 1:
+        log.warning(f"  Multiple STLs in surface/, using first: {stl_files[0].name}")
+    return stl_files[0]
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Multi-frame bifurcation CSA pipeline",
@@ -72,15 +83,20 @@ def main():
     branches_dir = subject_dir / "branches"
 
     if not branches_dir.exists():
-        logger.info("  Running branch detection on frame 0...")
-        from step0_branch_detect import main as branch_detect_main
-        old_argv = sys.argv
-        sys.argv = ["step0_branch_detect.py",
-                     str(subject_dir / "surface" / "frame0.stl"),
-                     "--output-dir", str(branches_dir),
-                     "--subject-id", subject_id]
-        branch_detect_main()
-        sys.argv = old_argv
+        logger.info("  Running branch detection on frame 0 (vmtk env)...")
+        import subprocess
+        script_dir = Path(__file__).parent
+        cmd = [
+            "conda", "run", "-n", "vmtk",
+            "python", str(script_dir / "step0_branch_detect.py"),
+            str(find_surface_stl(subject_dir)),
+            "--output-dir", str(branches_dir),
+            "--subject-id", subject_id,
+        ]
+        result = subprocess.run(cmd, capture_output=False)
+        if result.returncode != 0:
+            logger.error("Branch detection failed!")
+            sys.exit(1)
     else:
         logger.info(f"  Branches already exist: {branches_dir}")
 
@@ -95,7 +111,7 @@ def main():
 
     # ── Step 1: Septum refinement (frame 0) ────────────────
     logger.info(f"\n--- Step 1: Septum refinement ---")
-    frame0_stl = subject_dir / "surface" / "frame0.stl"
+    frame0_stl = find_surface_stl(subject_dir)
     full_mesh = read_stl(str(frame0_stl))
     left_cl_f0 = read_vtk_centerline(str(branches["LeftNose"]["centerline"]))
     right_cl_f0 = read_vtk_centerline(str(branches["RightNose"]["centerline"]))
