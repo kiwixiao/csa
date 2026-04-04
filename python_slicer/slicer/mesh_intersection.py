@@ -207,7 +207,12 @@ class MeshPlaneSlicer:
             except Exception as e:
                 continue
 
-        # If only one polygon, return it (no filtering needed)
+        # BUG: Single polygon skips containment check. If the plane produces
+        # one big loop that wraps both lumens (e.g., aortic arch), it passes
+        # even when the CL point is outside. Also, the multi-loop path below
+        # checks containment but returns ALL loops instead of filtering.
+        # Aortic pipeline bypasses this via _slice_with_containment().
+        # TODO: Fix by always checking containment and returning only matching loops.
         if len(all_polygons) <= 1:
             return all_polygons
 
