@@ -607,7 +607,7 @@ def generate_4panel_video(combined_dir, motion_stl_dir, df, output_dir,
         # Auto-detect in subject dir
         subject_dir = output_dir.parent
         for pattern in ["*FlowProfile.csv", "*flowprofile.csv", "*flow_profile.csv"]:
-            matches = list(subject_dir.glob(pattern))
+            matches = [m for m in subject_dir.glob(pattern) if not m.name.startswith("._")]
             if matches:
                 flow_profile_path = matches[0]
                 break
