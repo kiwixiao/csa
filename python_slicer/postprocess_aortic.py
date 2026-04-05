@@ -350,6 +350,20 @@ def run_aortic_postprocessing(output_dir, subject_id):
     log.info("\nComputing circularity...")
     df = compute_circularity(df, output_dir, subject_id)
 
+    # CoA visualization + clinical metrics
+    log.info("\nGenerating CoA visualizations...")
+    try:
+        from visualize_coa import render_all_views
+        subject_dir = output_dir.parent
+        surface_stls = list((subject_dir / "surface").glob("*.stl"))
+        if surface_stls:
+            stl_path = [s for s in surface_stls if not s.name.startswith("._")][0]
+            branches_dir = subject_dir / "branches"
+            coa_metrics = render_all_views(df, str(stl_path), str(branches_dir),
+                                           output_dir, subject_id)
+    except Exception as e:
+        log.warning(f"  CoA visualization failed: {e}")
+
     # Sanity check PNG (STL + centerlines + planes)
     log.info("\nGenerating sanity check...")
     generate_sanity_check(df, output_dir, subject_id)
