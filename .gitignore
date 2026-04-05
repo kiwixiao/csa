@@ -33,6 +33,7 @@ __pycache__/
 *SlicedSTLs_temp/
 archive/
 archive_tests/
+slice_test/
 
 # FFD output directories
 */FFD/stl/
@@ -46,6 +47,7 @@ archive_tests/
 *.swo
 *~
 .DS_Store
+._*
 
 # Lock files
 .~lock.*

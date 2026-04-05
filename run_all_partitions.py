@@ -65,25 +65,29 @@ def validate_partition(partition_name):
     return is_valid, issues, file_counts
 
 
-def run_pipeline(patient_id, partition_name, log_file, force=False):
+def run_pipeline(patient_id, partition_name, log_file, force=False, workers=0):
     """
     Run pipeline_full.py for a single partition
 
     Args:
         force: If True, bypass all cache and regenerate everything
+        workers: Number of parallel workers per step (0=auto, 1=sequential)
 
     Returns:
         subprocess.Popen: The process object
     """
+    script_dir = Path(__file__).parent / "python_slicer"
     cmd = [
         "python",
-        "python_slicer/pipeline_full.py",
+        str(script_dir / "pipeline_full.py"),
         patient_id,
         partition_name
     ]
 
     if force:
         cmd.append("--force")
+    if workers != 0:
+        cmd.extend(["--workers", str(workers)])
 
     log_path = Path(log_file)
     with open(log_path, 'w') as f:
@@ -156,6 +160,9 @@ Examples:
                        help='Partitions to process (default: LeftNoseDecending RightNose)')
     parser.add_argument('--force', action='store_true',
                        help='Force regeneration, bypass all cache')
+    parser.add_argument('--workers', type=int, default=0,
+                       help='Parallel workers per partition (0=auto, 1=sequential). '
+                            'Note: partitions already run in parallel, so total CPU = partitions x workers')
 
     args = parser.parse_args()
 
@@ -233,7 +240,7 @@ Examples:
         print(f"Starting: {partition}")
         print(f"  Log file: {log_file}")
 
-        process, log_path = run_pipeline(PATIENT_ID, partition, log_file, args.force)
+        process, log_path = run_pipeline(PATIENT_ID, partition, log_file, args.force, args.workers)
         processes.append((process, log_path, partition))
 
     print()

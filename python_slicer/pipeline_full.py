@@ -32,17 +32,16 @@ import numpy as np
 import trimesh
 
 # Add slicer module to path
-sys.path.insert(0, str(Path(__file__).parent))
+SCRIPT_DIR = Path(__file__).parent
+sys.path.insert(0, str(SCRIPT_DIR))
 
-# Import from root directory
-sys.path.insert(0, str(Path(__file__).parent.parent))
 from detect_incomplete_planes_optimized import (
     detect_incomplete_plane_optimized,
     detect_incomplete_planes_for_timepoint
 )
 
 
-def step1_slice_all_planes(subject, partition, output_dir):
+def step1_slice_all_planes(subject, partition, output_dir, workers=0):
     """Step 1: Slice ALL planes (for detection only)"""
     print("="*80)
     print("STEP 1: Slicing All Planes (For Detection)")
@@ -58,9 +57,10 @@ def step1_slice_all_planes(subject, partition, output_dir):
 
     # Run slicing without --indices (slices all planes along centerline)
     cmd = [
-        "python", "python_slicer/main.py",
+        "python", str(SCRIPT_DIR / "main.py"),
         subject, partition,
-        "-o", str(output_dir)
+        "-o", str(output_dir),
+        "--workers", str(workers)
     ]
 
     print(f"Running: {' '.join(cmd)}\n")
@@ -140,13 +140,46 @@ def step2_detect_mutual_planes(partition, output_dir):
     return mutual_file, mutual_indices
 
 
-def step3_detect_complete_planes_optimized(partition, mutual_indices, output_dir):
+def _detect_incomplete_for_single_timepoint(args_tuple):
+    """
+    Worker function for parallel incomplete plane detection.
+    Top-level for multiprocessing pickling.
+    """
+    import traceback as tb
+    i, stl_path, temp_output_str, n_planes, n_timepoints = args_tuple
+    try:
+        stl_name = Path(stl_path).stem
+        incomplete, stage1, stage2 = detect_incomplete_planes_for_timepoint(
+            temp_dir=Path(temp_output_str),
+            source_mesh_path=stl_path,
+            time_point=stl_name,
+            n_planes=n_planes
+        )
+        return {
+            'index': i, 'stl_name': stl_name,
+            'incomplete_indices': incomplete,
+            'stage1': stage1, 'stage2': stage2,
+            'error': None
+        }
+    except Exception as e:
+        return {
+            'index': i, 'stl_name': Path(stl_path).stem,
+            'incomplete_indices': [],
+            'stage1': 0, 'stage2': 0,
+            'error': tb.format_exc()
+        }
+
+
+def step3_detect_complete_planes_optimized(partition, mutual_indices, output_dir, workers=0):
     """
     Step 3: Detect complete planes using optimized two-stage detection
 
     Stage 1 (Fast): Edge length check to identify suspicious planes
     Stage 2 (Accurate): Surface validation to eliminate false positives
     """
+    import os
+    import multiprocessing
+
     print("\n" + "="*80)
     print("STEP 3: Detecting Complete Planes (Optimized Two-Stage)")
     print("="*80)
@@ -173,30 +206,64 @@ def step3_detect_complete_planes_optimized(partition, mutual_indices, output_dir
     total_stage1_flagged = 0
     total_stage2_confirmed = 0
 
-    for i, stl_path in enumerate(stl_files):
-        stl_name = Path(stl_path).stem
-        print(f"  [{i+1}/{n_timepoints}] {stl_name}...", end=' ', flush=True)
+    n_planes = max(mutual_indices) + 1 if mutual_indices else 148
 
-        # Detect incomplete planes for this time point
-        incomplete, stage1, stage2 = detect_incomplete_planes_for_timepoint(
-            temp_dir=temp_output,
-            source_mesh_path=stl_path,
-            time_point=stl_name,
-            n_planes=max(mutual_indices) + 1 if mutual_indices else 148
-        )
+    # Determine worker count
+    if workers == 0:
+        workers = max(1, min((os.cpu_count() or 4) // 2, 8))
+    workers = min(workers, n_timepoints)
 
-        total_stage1_flagged += stage1
-        total_stage2_confirmed += stage2
+    if workers <= 1:
+        # Sequential mode (original behavior)
+        for i, stl_path in enumerate(stl_files):
+            stl_name = Path(stl_path).stem
+            print(f"  [{i+1}/{n_timepoints}] {stl_name}...", end=' ', flush=True)
 
-        # Remove incomplete planes from complete set
-        incomplete_mutual = [idx for idx in incomplete if idx in complete_in_all]
-        for idx in incomplete_mutual:
-            complete_in_all.discard(idx)
+            incomplete, stage1, stage2 = detect_incomplete_planes_for_timepoint(
+                temp_dir=temp_output,
+                source_mesh_path=stl_path,
+                time_point=stl_name,
+                n_planes=n_planes
+            )
 
-        if incomplete_mutual:
-            print(f"{len(incomplete_mutual)} incomplete")
-        else:
-            print("all complete")
+            total_stage1_flagged += stage1
+            total_stage2_confirmed += stage2
+
+            incomplete_mutual = [idx for idx in incomplete if idx in complete_in_all]
+            for idx in incomplete_mutual:
+                complete_in_all.discard(idx)
+
+            if incomplete_mutual:
+                print(f"{len(incomplete_mutual)} incomplete")
+            else:
+                print("all complete")
+    else:
+        # Parallel mode
+        print(f"Using {workers} parallel workers for {n_timepoints} time points...")
+        frame_args = [
+            (i, stl_files[i], str(temp_output), n_planes, n_timepoints)
+            for i in range(n_timepoints)
+        ]
+
+        with multiprocessing.Pool(processes=workers) as pool:
+            results_list = pool.map(_detect_incomplete_for_single_timepoint, frame_args)
+
+        for result in results_list:
+            if result['error']:
+                print(f"  ERROR in frame {result['index']+1}: {result['error']}")
+                continue
+
+            total_stage1_flagged += result['stage1']
+            total_stage2_confirmed += result['stage2']
+
+            incomplete_mutual = [idx for idx in result['incomplete_indices']
+                                 if idx in complete_in_all]
+            for idx in incomplete_mutual:
+                complete_in_all.discard(idx)
+
+            status = (f"{len(incomplete_mutual)} incomplete" if incomplete_mutual
+                      else "all complete")
+            print(f"  [{result['index']+1}/{n_timepoints}] {result['stl_name']}: {status}")
 
     complete_mutual_indices = sorted(complete_in_all)
 
@@ -416,7 +483,7 @@ def step6_generate_plots_and_video(partition, output_dir):
 
     # Generate CSA plots
     print("\nGenerating CSA plots...")
-    cmd = ["python", "python_slicer/plot_csa_by_index.py", "--partition", partition]
+    cmd = ["python", str(SCRIPT_DIR / "plot_csa_by_index.py"), "--partition", partition]
     result = subprocess.run(cmd)
 
     if result.returncode != 0:
@@ -426,7 +493,7 @@ def step6_generate_plots_and_video(partition, output_dir):
 
     # Generate regular video (unlabeled)
     print("\nGenerating plane motion video...")
-    cmd = ["python", "python_slicer/create_plane_video_fast.py", partition]
+    cmd = ["python", str(SCRIPT_DIR / "create_plane_video_fast.py"), partition]
     result = subprocess.run(cmd)
 
     if result.returncode != 0:
@@ -436,7 +503,7 @@ def step6_generate_plots_and_video(partition, output_dir):
 
     # Generate interactive HTML plane reference
     print("\nGenerating interactive HTML plane reference...")
-    cmd = ["python", "python_slicer/create_plane_reference_interactive_plotly.py", partition]
+    cmd = ["python", str(SCRIPT_DIR / "create_plane_reference_interactive_plotly.py"), partition]
     result = subprocess.run(cmd)
 
     if result.returncode != 0:
@@ -507,7 +574,7 @@ def load_cached_indices(partition, output_dir):
     return mutual_file, mutual_indices, validated_file, validated_indices
 
 
-def run_full_pipeline(subject, partition, output_dir=".", force=False):
+def run_full_pipeline(subject, partition, output_dir=".", force=False, workers=0):
     """Run complete smart pipeline with caching support
 
     Args:
@@ -515,6 +582,7 @@ def run_full_pipeline(subject, partition, output_dir=".", force=False):
         partition: Partition name
         output_dir: Output directory
         force: If True, ignore cache and re-run all steps
+        workers: Number of parallel workers (0=auto, 1=sequential)
     """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -547,7 +615,7 @@ def run_full_pipeline(subject, partition, output_dir=".", force=False):
         print(f"✓ Found {len(csv_files)} CSV files in {temp_output}")
         print("✓ Skipping Step 1 (already completed)")
     else:
-        if not step1_slice_all_planes(subject, partition, output_dir):
+        if not step1_slice_all_planes(subject, partition, output_dir, workers=workers):
             print("\n❌ Pipeline failed at Step 1")
             return False
 
@@ -581,7 +649,7 @@ def run_full_pipeline(subject, partition, output_dir=".", force=False):
         print(f"✓ File: {validated_file}")
         print("✓ Skipping Step 3 (already completed)")
     else:
-        result = step3_detect_complete_planes_optimized(partition, mutual_indices, output_dir)
+        result = step3_detect_complete_planes_optimized(partition, mutual_indices, output_dir, workers=workers)
         if result is None:
             print("\n❌ Pipeline failed at Step 3")
             return False
@@ -647,7 +715,7 @@ def run_full_pipeline(subject, partition, output_dir=".", force=False):
         # Import and run the advanced analysis module
         import subprocess
         result = subprocess.run(
-            ['python', 'python_slicer/analyze_airway_dynamics_advanced.py', subject, partition],
+            ['python', str(SCRIPT_DIR / 'analyze_airway_dynamics_advanced.py'), subject, partition],
             capture_output=True,
             text=True,
             timeout=600  # 10 minute timeout
@@ -703,7 +771,7 @@ def run_full_pipeline(subject, partition, output_dir=".", force=False):
     return True
 
 
-if __name__ == "__main__":
+def main():
     import argparse
 
     parser = argparse.ArgumentParser(
@@ -715,6 +783,8 @@ if __name__ == "__main__":
                        help='Output directory')
     parser.add_argument('--force', action='store_true',
                        help='Force re-run all steps (ignore cache)')
+    parser.add_argument('--workers', type=int, default=0,
+                       help='Parallel workers per step (0=auto, 1=sequential)')
 
     args = parser.parse_args()
 
@@ -722,7 +792,12 @@ if __name__ == "__main__":
         args.subject,
         args.partition,
         args.output,
-        force=args.force
+        force=args.force,
+        workers=args.workers
     )
 
     sys.exit(0 if success else 1)
+
+
+if __name__ == "__main__":
+    main()

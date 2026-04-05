@@ -1,0 +1,61 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "csa-slicer"
+version = "1.0.0"
+description = "Cross-Sectional Area analysis pipeline for airway and vascular geometry from CFD data"
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24.0",
+    "scipy>=1.10.0",
+    "pandas>=2.0.0",
+    "matplotlib>=3.7.0",
+    "trimesh>=4.0.0",
+    "pyvista>=0.43.0",
+    "shapely>=2.0.0",
+    "networkx>=3.0",
+    "rtree>=1.0.0",
+    "plotly>=5.0.0",
+]
+
+[project.optional-dependencies]
+test = ["pytest>=7.4.0"]
+
+[project.scripts]
+csa-pipeline = "pipeline_full:main"
+csa-bifurcation = "pipeline_bifurcation:main"
+csa-aortic = "pipeline_aortic:main"
+csa-slice = "main:main"
+
+[tool.setuptools]
+py-modules = [
+    "main",
+    "main_consistent",
+    "pipeline_full",
+    "pipeline_bifurcation",
+    "pipeline_aortic",
+    "plot_csa_by_index",
+    "plot_csa_cycle",
+    "postprocess_bifurcation",
+    "postprocess_aortic",
+    "slice_bifurcation",
+    "slice_single",
+    "interpolate_frames",
+    "step0_branch_detect",
+    "branch_detector",
+    "aortic_branch_detector",
+    "detect_incomplete_planes_optimized",
+    "create_plane_motion_video",
+    "create_plane_video_fast",
+    "create_plane_video_labeled",
+    "create_plane_reference_interactive_plotly",
+    "analyze_airway_dynamics_advanced",
+    "analyze_airway_dynamics",
+    "visualize_branches",
+    "visualize_coa",
+]
+
+[tool.setuptools.packages.find]
+include = ["slicer*"]

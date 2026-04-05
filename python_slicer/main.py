@@ -17,7 +17,11 @@ Example:
 import os
 import sys
 import glob
+import io
 import argparse
+import traceback
+import contextlib
+import multiprocessing
 from pathlib import Path
 import pandas as pd
 import numpy as np
@@ -45,11 +49,86 @@ def load_valid_indices(indices_file: str) -> list:
     return indices
 
 
+def _process_single_frame(args_tuple):
+    """
+    Process a single time-point frame. Top-level function for multiprocessing.
+
+    Args:
+        args_tuple: (frame_index, vtk_path, stl_path, valid_indices,
+                     centerline_smooth_window, output_dir_str, n_files)
+    Returns:
+        dict with keys: base_name, file_index, slicing_results,
+                        diameter_profile, measurements_df, stdout, error
+    """
+    frame_index, vtk_path, stl_path, valid_indices, \
+        centerline_smooth_window, output_dir_str, n_files = args_tuple
+
+    captured = io.StringIO()
+    try:
+        with contextlib.redirect_stdout(captured):
+            vtk_name = Path(vtk_path).name
+            stl_name = Path(stl_path).name
+
+            print(f"\n{'='*80}")
+            print(f"Processing time point {frame_index+1}/{n_files}")
+            print(f"  VTK: {vtk_name}")
+            print(f"  STL: {stl_name}")
+            print(f"{'='*80}")
+
+            centerline = read_vtk_centerline(vtk_path)
+            centerline_smooth = smooth_centerline(
+                centerline, window=centerline_smooth_window)
+
+            slicer = AirwaySlicer(stl_path, vtk_path)
+
+            from slicer.geometry import compute_all_plane_normals
+            slicer.plane_normals = compute_all_plane_normals(
+                centerline_smooth, smooth=True)
+
+            results = slicer.slice_along_centerline(
+                quality_checks=False,
+                specific_indices=valid_indices
+            )
+
+            print(f"\nSlicing complete:")
+            print(f"  Valid planes: {len(results.valid_sections)} / {len(valid_indices)}")
+
+            diameter_profile = results.compute_diameter_profile()
+
+            base_name = Path(stl_path).stem
+            slicer.export_results(results, base_name, output_dir_str)
+
+            df = diameter_profile.to_dataframe()
+            df['file_name'] = base_name
+            df['file_index'] = frame_index
+
+        return {
+            'base_name': base_name,
+            'file_index': frame_index,
+            'slicing_results': results,
+            'diameter_profile': diameter_profile,
+            'measurements_df': df,
+            'stdout': captured.getvalue(),
+            'error': None
+        }
+    except Exception as e:
+        return {
+            'base_name': Path(stl_path).stem,
+            'file_index': frame_index,
+            'slicing_results': None,
+            'diameter_profile': None,
+            'measurements_df': None,
+            'stdout': captured.getvalue(),
+            'error': traceback.format_exc()
+        }
+
+
 def process_subject_consistent(subject_name: str,
                                partition: str,
                                valid_indices: list,
                                centerline_smooth_window: int = 5,
-                               output_base_dir: str = "."):
+                               output_base_dir: str = ".",
+                               workers: int = 0):
     """
     Process all time points using consistent plane indices
 
@@ -59,6 +138,7 @@ def process_subject_consistent(subject_name: str,
         valid_indices: List of valid plane indices to use
         centerline_smooth_window: Window for centerline smoothing
         output_base_dir: Output directory
+        workers: Number of parallel workers (0=auto, 1=sequential)
     """
     print("="*80)
     print(f"Python Slicer - Consistent Planes Mode")
@@ -105,58 +185,51 @@ def process_subject_consistent(subject_name: str,
 
     n_files = min(len(vtk_files), len(stl_files))
 
-    for i in range(n_files):
-        vtk_path = vtk_files[i]
-        stl_path = stl_files[i]
+    # Determine worker count
+    if workers == 0:
+        workers = max(1, min((os.cpu_count() or 4) // 2, 8))
+    workers = min(workers, n_files)
 
-        vtk_name = Path(vtk_path).name
-        stl_name = Path(stl_path).name
+    # Build args for each frame
+    frame_args = [
+        (i, vtk_files[i], stl_files[i], valid_indices,
+         centerline_smooth_window, str(output_dir), n_files)
+        for i in range(n_files)
+    ]
 
-        print(f"\n{'='*80}")
-        print(f"Processing time point {i+1}/{n_files}")
-        print(f"  VTK: {vtk_name}")
-        print(f"  STL: {stl_name}")
-        print(f"{'='*80}")
+    if workers <= 1:
+        # Sequential mode (original behavior)
+        print(f"\nProcessing {n_files} frames sequentially...")
+        results_list = [_process_single_frame(args) for args in frame_args]
+    else:
+        # Parallel mode
+        print(f"\nProcessing {n_files} frames with {workers} parallel workers...")
+        print("(Output will be shown after all frames complete)")
+        with multiprocessing.Pool(processes=workers) as pool:
+            results_list = pool.map(_process_single_frame, frame_args)
 
-        # Load centerline
-        centerline = read_vtk_centerline(vtk_path)
-        centerline_smooth = smooth_centerline(centerline, window=centerline_smooth_window)
+    # Collect results
+    n_errors = 0
+    for result in results_list:
+        # Replay captured stdout
+        if result.get('stdout'):
+            print(result['stdout'], end='')
 
-        # Create slicer with ORIGINAL centerline positions
-        slicer = AirwaySlicer(stl_path, vtk_path)
+        if result.get('error'):
+            n_errors += 1
+            print(f"\nERROR in frame {result['file_index']+1}/{n_files}: "
+                  f"{result['error']}")
+            continue
 
-        # Keep original centerline positions (don't override!)
-        # Only compute normals from smoothed centerline for smooth orientation
-        from slicer.geometry import compute_all_plane_normals
-        slicer.plane_normals = compute_all_plane_normals(centerline_smooth, smooth=True)
-
-        # Slice only at valid indices
-        results = slicer.slice_along_centerline(
-            quality_checks=False,  # Already validated
-            specific_indices=valid_indices
-        )
-
-        print(f"\nSlicing complete:")
-        print(f"  Valid planes: {len(results.valid_sections)} / {len(valid_indices)}")
-
-        # Compute diameter profile
-        diameter_profile = results.compute_diameter_profile()
-
-        # Export
-        base_name = Path(stl_path).stem
-        slicer.export_results(results, base_name, str(output_dir))
-
-        # Store
-        all_results[base_name] = {
-            'slicing_results': results,
-            'diameter_profile': diameter_profile
+        all_results[result['base_name']] = {
+            'slicing_results': result['slicing_results'],
+            'diameter_profile': result['diameter_profile']
         }
+        if result['measurements_df'] is not None:
+            all_measurements.append(result['measurements_df'])
 
-        # Collect measurements
-        df = diameter_profile.to_dataframe()
-        df['file_name'] = base_name
-        df['file_index'] = i
-        all_measurements.append(df)
+    if n_errors > 0:
+        print(f"\nWARNING: {n_errors}/{n_files} frames failed")
 
     # Save combined results
     print(f"\n{'='*80}")
@@ -190,6 +263,8 @@ def main():
                        help='Centerline smoothing window (default: 20)')
     parser.add_argument('-o', '--output', type=str, default='.',
                        help='Output directory (default: current)')
+    parser.add_argument('--workers', type=int, default=0,
+                       help='Parallel workers for frame processing (0=auto, 1=sequential)')
 
     args = parser.parse_args()
 
@@ -226,7 +301,8 @@ def main():
             args.partition,
             valid_indices,
             centerline_smooth_window=args.window,
-            output_base_dir=args.output
+            output_base_dir=args.output,
+            workers=args.workers
         )
     except KeyboardInterrupt:
         print("\n\nProcessing interrupted by user")
