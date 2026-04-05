@@ -24,7 +24,7 @@ dependencies = [
 test = ["pytest>=7.4.0"]
 
 [project.scripts]
-csa-pipeline = "pipeline_full:main"
+csa-legacy = "pipeline_full:main"
 csa-bifurcation = "pipeline_bifurcation:main"
 csa-aortic = "pipeline_aortic:main"
 csa-slice = "main:main"
