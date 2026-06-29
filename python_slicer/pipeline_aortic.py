@@ -146,13 +146,35 @@ def _extend_cl_to_profile(centerline, mesh, offset_mm=1.0):
     """Extend centerline start/end to 1mm inside the open profile boundary.
 
     Detects open profile edges near each CL endpoint, computes the
-    profile barycenter, and prepends/appends a point 1mm inward.
+    profile barycenter and cap plane normal. Returns extended centerline
+    and the cap normals for use in slicing.
+
+    NOTE: As of 2026-04-20 the END cap is intentionally skipped — different
+    downstream cut geometries between native and repaired STLs were
+    producing different distal-aorta CSAs independent of actual lumen
+    change. Only the START (ascending) end is cap-matched, the descending
+    end uses plain normal-to-centerline planes.
     """
     import trimesh
+    from collections import Counter
 
     extended = centerline.copy()
+    cap_normals = {}  # "start" / "end" -> normal vector
 
-    for end in ["start", "end"]:
+    # Precompute boundary edges once
+    edges = mesh.edges_unique
+    edge_midpoints = mesh.vertices[edges].mean(axis=1)
+    edge_face_count = Counter()
+    for face in mesh.faces:
+        for i in range(3):
+            e = tuple(sorted([face[i], face[(i+1) % 3]]))
+            edge_face_count[e] += 1
+    boundary_mask = np.array([
+        edge_face_count.get(tuple(sorted(e)), 0) == 1
+        for e in edges
+    ])
+
+    for end in ["start"]:   # end-cap skipped by default
         if end == "start":
             cl_tip = centerline[0]
             cl_next = centerline[1]
@@ -160,51 +182,42 @@ def _extend_cl_to_profile(centerline, mesh, offset_mm=1.0):
             cl_tip = centerline[-1]
             cl_next = centerline[-2]
 
-        # Direction from tip into the lumen
         inward = cl_next - cl_tip
         inward = inward / (np.linalg.norm(inward) + 1e-12)
 
-        # Find boundary edges near the tip
-        edges = mesh.edges_unique
-        edge_midpoints = mesh.vertices[edges].mean(axis=1)
         dists = np.linalg.norm(edge_midpoints - cl_tip, axis=1)
-
-        # Boundary edges: edges that appear in only 1 face
-        from collections import Counter
-        edge_face_count = Counter()
-        for face in mesh.faces:
-            for i in range(3):
-                e = tuple(sorted([face[i], face[(i+1) % 3]]))
-                edge_face_count[e] += 1
-
-        boundary_mask = np.array([
-            edge_face_count.get(tuple(sorted(e)), 0) == 1
-            for e in edges
-        ])
-
-        # Boundary edges near the tip (within 2x the local radius)
         nearby = dists < np.percentile(dists, 10)
         profile_edges = boundary_mask & nearby
 
         if profile_edges.sum() < 3:
             continue
 
-        # Profile barycenter
-        profile_pts = edge_midpoints[profile_edges]
+        # Profile boundary vertices
+        profile_pts = mesh.vertices[np.unique(edges[profile_edges].ravel())]
         barycenter = profile_pts.mean(axis=0)
 
-        # New point: barycenter (right at the cap opening)
-        new_pt = barycenter
+        # Fit plane to profile boundary → cap normal via SVD
+        centered = profile_pts - barycenter
+        _, _, vh = np.linalg.svd(centered)
+        cap_normal = vh[2]  # smallest singular value = plane normal
+
+        # Orient normal to point inward (same direction as centerline)
+        if np.dot(cap_normal, inward) < 0:
+            cap_normal = -cap_normal
+        cap_normals[end] = cap_normal
+
+        # New point: 1mm inward from barycenter along cap normal
+        new_pt = barycenter + offset_mm * cap_normal
 
         if end == "start":
             extended = np.vstack([new_pt.reshape(1, 3), extended])
         else:
             extended = np.vstack([extended, new_pt.reshape(1, 3)])
 
-    return extended
+    return extended, cap_normals
 
 
-def _slice_with_containment(mesh, centerline, label, output_dir, name, log):
+def _slice_with_containment(mesh, centerline, label, output_dir, name, log, cap_normals=None):
     """Slice mesh along CL, keep only loops containing the CL point.
 
     Uses trimesh.section + shapely containment check. This correctly
@@ -220,6 +233,20 @@ def _slice_with_containment(mesh, centerline, label, output_dir, name, log):
     planes_dir.mkdir(parents=True, exist_ok=True)
 
     normals = compute_all_plane_normals(centerline, smooth=True)
+
+    # Local blend: cap normals at ends, fade out over ~8 planes, rest untouched
+    if cap_normals:
+        blend_zone = min(8, len(normals) // 4)
+        for end_name, indices in [("start", range(blend_zone)),
+                                   ("end", range(len(normals)-1, len(normals)-1-blend_zone, -1))]:
+            if end_name not in cap_normals:
+                continue
+            cap_n = cap_normals[end_name]
+            for j, idx in enumerate(indices):
+                w = np.cos(np.pi / 2 * j / blend_zone) ** 2  # 1.0 at edge, 0.0 at blend_zone
+                blended = w * cap_n + (1.0 - w) * normals[idx]
+                normals[idx] = blended / (np.linalg.norm(blended) + 1e-12)
+
     all_rows = []
     positions = []
     count = 0
@@ -530,6 +557,16 @@ def main():
             "--subject-id", subject_id,
             "--resampling-step", str(args.resampling_step),
         ]
+        # Optional inlet hint: surface/inlet_hint.txt contains "x,y,z" (mm)
+        # from the source labeled CFD STL — overrides largest-loop default
+        # when that heuristic picks the wrong opening.
+        hint_path = stl_path.parent / "inlet_hint.txt"
+        if hint_path.exists():
+            hint = hint_path.read_text().strip()
+            if hint:
+                # Use = form to avoid argparse treating negative values as flags.
+                cmd.append(f"--inlet-hint={hint}")
+                logger.info(f"  Using inlet hint {hint} from {hint_path}")
         result = subprocess.run(cmd, capture_output=False)
         if result.returncode != 0:
             logger.error("Branch detection failed!")
@@ -553,20 +590,37 @@ def main():
 
         centerline = read_vtk_centerline(str(cl_path))
 
-        # Resample to uniform 2mm spacing
+        # Smooth centerline with moving average, then resample to uniform 1mm
         from scipy.interpolate import interp1d
+        from scipy.ndimage import uniform_filter1d
+
+        # Moving average smooth (window=5) on interior points, pin endpoints
+        if len(centerline) >= 5:
+            start_pt = centerline[0].copy()
+            end_pt = centerline[-1].copy()
+            for axis in range(3):
+                centerline[:, axis] = uniform_filter1d(centerline[:, axis], size=5)
+            centerline[0] = start_pt
+            centerline[-1] = end_pt
+
+        # Resample to uniform 1mm spacing
         arc = compute_arc_length(centerline)
         total_len = arc[-1] if len(arc) > 0 else 0
         if total_len > 0:
-            n_pts = max(int(total_len / 2.0), 5)
+            start_pt = centerline[0].copy()
+            end_pt = centerline[-1].copy()
+            n_pts = max(int(total_len / 1.0), 5)
             t_uniform = np.linspace(0, total_len, n_pts)
-            centerline = interp1d(arc, centerline, axis=0, kind='cubic')(t_uniform)
+            interp_kind = 'cubic' if len(arc) >= 4 else 'linear'
+            centerline = interp1d(arc, centerline, axis=0, kind=interp_kind)(t_uniform)
+            centerline[0] = start_pt
+            centerline[-1] = end_pt
 
-        # Extend CL to open profile boundaries (1mm inside)
-        centerline = _extend_cl_to_profile(centerline, full_mesh, offset_mm=1.0)
+        # Extend CL to open profile boundaries (1mm inside) + get cap normals
+        centerline, cap_normals = _extend_cl_to_profile(centerline, full_mesh, offset_mm=1.0)
 
         logger.info(f"  {label}: CL {len(centerline)} pts "
-                     f"({total_len:.1f}mm, resampled to 2mm, extended to profiles)")
+                     f"({total_len:.1f}mm, smoothed+resampled to 1mm)")
 
         # Load branch mesh if available
         branch_mesh = None
@@ -586,14 +640,16 @@ def main():
             if trunk_mesh is not None:
                 logger.info(f"    Slicing Ascending (Trunk: {len(trunk_mesh.faces)} faces)")
                 rows_asc = _slice_with_containment(
-                    trunk_mesh, centerline, "Ascending", output_dir, subject_id, logger)
+                    trunk_mesh, centerline, "Ascending", output_dir, subject_id, logger,
+                    cap_normals=cap_normals)
                 all_rows.extend(rows_asc)
 
             # Slice Descending
             if desc_mesh is not None:
                 logger.info(f"    Slicing Descending (Branch: {len(desc_mesh.faces)} faces)")
                 rows_desc = _slice_with_containment(
-                    desc_mesh, centerline, "Descending", output_dir, subject_id, logger)
+                    desc_mesh, centerline, "Descending", output_dir, subject_id, logger,
+                    cap_normals=cap_normals)
                 all_rows.extend(rows_desc)
         else:
             rows = slice_branch(

@@ -49,36 +49,99 @@ def compute_coa_metrics(df):
     if len(main) == 0:
         return None
 
-    # Find Branch_3 (last arch branch = left subclavian) arc length
+    # Branches ordered by position along centerline (not outlet size)
+    # Exclude dAo (continuation) — it has the most CSA planes
     branch_arcs = _get_branch_arc_lengths(df)
-    last_branch = max(branch_arcs.values()) if branch_arcs else 0
 
-    # Reference: descending aorta at diaphragm (last 10 planes)
-    n_ref = min(10, len(main) // 3)
-    ref_planes = main.tail(n_ref)
+    # Identify dAo: the branch with the most planes in the CSV
+    branch_plane_counts = {}
+    for region in df["region"].unique():
+        if region == "MainAorta":
+            continue
+        branch_plane_counts[region] = len(df[df["region"] == region])
+
+    # Map VMTK names to ordered names used by _get_branch_arc_lengths
+    # The function already relabels by arc length order
+    # Find which ordered branch has the most planes (= dAo)
+    if branch_plane_counts:
+        # Sort original branch names by their arc length on MainAorta
+        from scipy.spatial import cKDTree
+        main_centroids = main[["centroid_x", "centroid_y", "centroid_z"]].values
+        main_arcs_arr = main["arc_length_mm"].values
+        tree = cKDTree(main_centroids)
+
+        orig_to_arc = {}
+        for region in branch_plane_counts:
+            rdf = df[df["region"] == region].sort_values("arc_length_mm")
+            if len(rdf) > 0:
+                fc = rdf.iloc[0][["centroid_x", "centroid_y", "centroid_z"]].values.astype(float)
+                _, idx = tree.query(fc)
+                orig_to_arc[region] = float(main_arcs_arr[idx])
+
+        # The branch with most planes = dAo
+        dAo_name = max(branch_plane_counts, key=branch_plane_counts.get)
+        dAo_arc = orig_to_arc.get(dAo_name, 0)
+
+        # Side branches = all except dAo, sorted by arc length
+        side_branch_arcs = sorted([a for r, a in orig_to_arc.items() if r != dAo_name])
+        last_side_branch = side_branch_arcs[-1] if side_branch_arcs else 0
+    else:
+        last_side_branch = 0
+
+    # Reference: descending aorta at diaphragm (bottom 5% of arc length)
+    total_arc = main["arc_length_mm"].max()
+    ref_start = total_arc * 0.95
+    ref_planes = main[main["arc_length_mm"] >= ref_start]
+    if len(ref_planes) < 3:
+        ref_planes = main.tail(3)
     ref_csa = ref_planes["area_mm2"].mean()
     ref_diam = ref_planes["hydraulic_diameter_mm"].mean()
     ref_arc = ref_planes["arc_length_mm"].mean()
 
-    # Isthmus region: planes just after last arch branch
-    # Take the first ~15 planes after the last branch divergence
-    isthmus_start = last_branch
-    isthmus_region = main[main["arc_length_mm"] >= isthmus_start].head(15)
+    # Isthmus region: anatomical segment DISTAL to the last side-branch (LSA).
+    # We add a small buffer (2 mm) past the LSA takeoff to skip the ostium
+    # plane, which otherwise dominates as a spurious min in hypoplastic-arch
+    # anatomies (e.g. COA002 where the hypoplastic arch extends right up to
+    # the LSA ostium and the true isthmus is post-stenotic).
+    LSA_BUFFER_MM = 2.0
+    isthmus_start = last_side_branch + LSA_BUFFER_MM
+    descending_range = max(total_arc - isthmus_start, 0.0)
+    isthmus_end = isthmus_start + descending_range * 0.5
+    isthmus_region = main[(main["arc_length_mm"] >= isthmus_start) &
+                          (main["arc_length_mm"] <= isthmus_end)].reset_index()
 
-    if len(isthmus_region) > 0:
-        # CoA measurement: minimum CSA in the isthmus region
-        isthmus_min_idx = isthmus_region["area_mm2"].idxmin()
-        isthmus_row = isthmus_region.loc[isthmus_min_idx]
-        coa_csa = isthmus_row["area_mm2"]
-        coa_diam = isthmus_row["hydraulic_diameter_mm"]
-        coa_arc = isthmus_row["arc_length_mm"]
-    else:
-        # Fallback: global min
+    def _find_isthmus_stenosis(region_df):
+        """Find LOCAL min CSA (dCSA/darc sign change from − to +) within the
+        isthmus segment, not the global min. Returns (row, kind) where
+        kind is 'local_min', 'region_min_fallback', or 'no_focal_stenosis'.
+        """
+        if len(region_df) == 0:
+            return None, "empty"
+        arcs = region_df["arc_length_mm"].to_numpy()
+        csas = region_df["area_mm2"].to_numpy()
+        if len(csas) >= 3:
+            dcsa = np.diff(csas) / np.maximum(np.diff(arcs), 1e-9)
+            # local minimum = CSA[i] < both neighbors
+            for i in range(1, len(csas) - 1):
+                if csas[i] < csas[i - 1] and csas[i] < csas[i + 1]:
+                    return region_df.iloc[i], "local_min"
+            # No strict local min. If region monotonically rises from
+            # isthmus start, there is no focal stenosis in the isthmus —
+            # report the narrowest plane as a cosmetic reference only.
+            if csas[0] < csas[-1]:
+                return region_df.iloc[int(csas.argmin())], "no_focal_stenosis"
+        # Fallback: just the min in the region
+        return region_df.iloc[int(csas.argmin())], "region_min_fallback"
+
+    isthmus_row, isthmus_kind = _find_isthmus_stenosis(isthmus_region)
+    if isthmus_row is None:
+        # Should only happen if there is no descending aorta to analyze.
         isthmus_min_idx = main["area_mm2"].idxmin()
         isthmus_row = main.loc[isthmus_min_idx]
-        coa_csa = isthmus_row["area_mm2"]
-        coa_diam = isthmus_row["hydraulic_diameter_mm"]
-        coa_arc = isthmus_row["arc_length_mm"]
+        isthmus_kind = "global_min_fallback"
+    coa_csa = isthmus_row["area_mm2"]
+    coa_diam = isthmus_row["hydraulic_diameter_mm"]
+    coa_arc = isthmus_row["arc_length_mm"]
 
     # Global min CSA (may differ from isthmus min)
     global_min_idx = main["area_mm2"].idxmin()
@@ -128,7 +191,8 @@ def compute_coa_metrics(df):
         "max_min_ratio": max_row["area_mm2"] / coa_csa if coa_csa > 0 else 0,
         # Landmarks
         "isthmus_arc_start": isthmus_start,
-        "last_branch_arc": last_branch,
+        "last_branch_arc": last_side_branch,
+        "isthmus_detection_kind": isthmus_kind,
     }
     return metrics
 
@@ -138,6 +202,8 @@ def _get_branch_arc_lengths(df):
 
     Maps branch first-plane centroid to nearest MainAorta plane
     to get the divergence point on the MainAorta arc length.
+    Branches are ordered by their occurrence along the ascending aorta
+    (anatomical order), not by VMTK's size-based naming.
     """
     main = df[df["region"] == "MainAorta"].sort_values("arc_length_mm")
     if len(main) == 0:
@@ -149,17 +215,26 @@ def _get_branch_arc_lengths(df):
     from scipy.spatial import cKDTree
     tree = cKDTree(main_centroids)
 
-    branches = {}
+    # Collect all branch divergence points
+    raw_branches = []
     for region in sorted(df["region"].unique()):
         if region == "MainAorta":
             continue
         rdf = df[df["region"] == region].sort_values("arc_length_mm")
         if len(rdf) == 0:
             continue
-        # First plane of branch — find nearest MainAorta plane
         first_centroid = rdf.iloc[0][["centroid_x", "centroid_y", "centroid_z"]].values.astype(float)
         dist, idx = tree.query(first_centroid)
-        branches[region] = float(main_arcs[idx])
+        raw_branches.append((region, float(main_arcs[idx])))
+
+    # Sort by arc length (anatomical order along ascending aorta)
+    raw_branches.sort(key=lambda x: x[1])
+
+    # Relabel as Branch_1, Branch_2, ... by order of appearance
+    branches = {}
+    for i, (orig_name, arc) in enumerate(raw_branches):
+        ordered_name = f"Branch_{i+1}"
+        branches[ordered_name] = arc
 
     return branches
 
@@ -460,40 +535,49 @@ def render_centerline_csa(df, stl_path, output_path, subject_id, metrics=None):
     if len(main) == 0:
         return
 
-    # Build centerline polyline from plane centroids
+    # Build centerline polyline from plane centroids, spline-smoothed along
+    # arc length so gaps (e.g. BT region with missing MainAorta planes)
+    # render as a continuous curve instead of a straight-line shortcut.
     centroids = main[["centroid_x", "centroid_y", "centroid_z"]].values.astype(float)
     csa_values = main["area_mm2"].values.astype(float)
+    arc_vals = main["arc_length_mm"].values.astype(float)
 
-    # Create tube along centerline, radius scaled by sqrt(CSA/pi) for visual
-    points = pv.PolyData(centroids)
-    n = len(centroids)
+    from scipy.interpolate import CubicSpline
+    n = 500
+    arc_dense = np.linspace(arc_vals[0], arc_vals[-1], n)
+    centroids_dense = np.column_stack([
+        CubicSpline(arc_vals, centroids[:, i])(arc_dense) for i in range(3)
+    ])
+    csa_dense = np.interp(arc_dense, arc_vals, csa_values)
+
     lines = np.zeros(n + 1, dtype=int)
     lines[0] = n
     lines[1:] = np.arange(n)
-    poly = pv.PolyData(centroids)
+    poly = pv.PolyData(centroids_dense)
     poly.lines = lines
-    poly.point_data["CSA"] = csa_values
+    poly.point_data["CSA"] = csa_dense
 
-    # Tube with constant radius (visual, not scaled)
-    tube = poly.tube(radius=1.5, n_sides=20)
+    # Thinner constant-radius tube (was 1.5)
+    TUBE_R = 0.6
+    tube = poly.tube(radius=TUBE_R, n_sides=20)
     tube.point_data["CSA"] = np.interp(
         np.arange(tube.n_points),
         np.linspace(0, tube.n_points - 1, n),
-        csa_values,
+        csa_dense,
     )
 
     mesh = pv.read(str(stl_path))
 
     # Compute CI-relative values (CSA / CSA_ref)
     ref_csa = metrics["ref_csa_mm2"] if metrics else csa_values.mean()
-    ci_values = csa_values / ref_csa
+    ci_dense = csa_dense / ref_csa
 
     # Also create CI-colored tube
-    tube_ci = poly.tube(radius=1.5, n_sides=20)
+    tube_ci = poly.tube(radius=TUBE_R, n_sides=20)
     tube_ci.point_data["CI"] = np.interp(
         np.arange(tube_ci.n_points),
         np.linspace(0, tube_ci.n_points - 1, n),
-        ci_values,
+        ci_dense,
     )
 
     # Helper to set up camera

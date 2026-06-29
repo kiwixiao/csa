@@ -72,12 +72,22 @@ def classify_open_profiles_aortic(
 
     labels = {}
 
-    # Inlet = largest boundary loop (most points)
-    inlet = max(profiles, key=lambda p: p["n_points"])
-    # Map to "Trachea" so parent's save logic works
+    # Inlet: if a hint coordinate was passed on the CLI, pick the profile
+    # whose barycenter is closest to it (most reliable when the CFD STL
+    # has labeled caps — avoids the "largest-boundary-loop" heuristic
+    # misfiring when mesh-point density differs between openings).
+    inlet_hint = getattr(_CLASSIFY_CTX, "inlet_hint", None)
+    if inlet_hint is not None:
+        hint = np.asarray(inlet_hint, dtype=float)
+        inlet = min(profiles, key=lambda p: float(np.linalg.norm(np.asarray(p["barycenter"]) - hint)))
+        print(f"  Inlet: profile {inlet['id']} (hint match, "
+              f"barycenter={inlet['barycenter']}) → mapped to 'Trachea'")
+    else:
+        # Fallback: largest boundary loop (most points)
+        inlet = max(profiles, key=lambda p: p["n_points"])
+        print(f"  Inlet: profile {inlet['id']} ({inlet['n_points']} pts, "
+              f"largest loop) → mapped to 'Trachea'")
     labels[inlet["id"]] = "Trachea"
-    print(f"  Inlet: profile {inlet['id']} ({inlet['n_points']} pts) "
-          f"→ mapped to 'Trachea' for VMTK compat")
 
     # Outlets = rest, sorted by size (descending)
     outlets = [p for p in profiles if p["id"] != inlet["id"]]
@@ -155,6 +165,11 @@ class AorticBranchDetector:
 # CLI
 # ---------------------------------------------------------------------------
 
+class _ClassifyCtx:
+    inlet_hint = None
+_CLASSIFY_CTX = _ClassifyCtx()
+
+
 if __name__ == "__main__":
     import argparse
 
@@ -164,7 +179,13 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", default="./branches")
     parser.add_argument("--subject-id", default="")
     parser.add_argument("--resampling-step", type=float, default=2.0)
+    parser.add_argument("--inlet-hint",
+        help="Comma-separated x,y,z (mm) — overrides largest-loop heuristic "
+             "and picks the profile whose barycenter is closest to this hint")
     args = parser.parse_args()
+
+    if args.inlet_hint:
+        _CLASSIFY_CTX.inlet_hint = [float(v) for v in args.inlet_hint.split(",")]
 
     detector = AorticBranchDetector(args.stl_path, args.resampling_step)
     detector.run(args.output_dir, args.subject_id)

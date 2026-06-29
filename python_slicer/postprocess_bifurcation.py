@@ -167,10 +167,13 @@ def plot_csa_heatmap_per_region(df, output_dir, subject_id):
 # ---------------------------------------------------------------------------
 
 def compute_compliance_per_region(df, output_dir, subject_id):
-    """Compute compliance % per plane per region.
+    """Compute airway collapse % per plane per region.
 
-    Compliance = (max_CSA - min_CSA) / mean_CSA × 100%
-    >30% = high collapse risk, 15-30% = moderate, <15% = stable
+    Collapse = (CSAmax - CSAmin) / CSAmax × 100%
+    This is the tracheomalacia criterion (Boiselle et al., Radiology 2006):
+      >50% = tracheomalacia (abnormal collapse)
+      >70% = severe tracheomalacia
+      <50% = normal
     """
     regions = [r for r in df["region"].unique() if r != "NasalCombined"]
     if "frame_name" not in df.columns:
@@ -191,7 +194,10 @@ def compute_compliance_per_region(df, output_dir, subject_id):
             area_mean = pdata["area_mm2"].mean()
             area_std = pdata["area_mm2"].std()
 
+            # Original compliance: (max-min)/mean
             compliance = (area_max - area_min) / area_mean * 100 if area_mean > 0 else 0
+            # Tracheomalacia criterion: (max-min)/max (0-100%, clinically validated)
+            collapse_pct = (area_max - area_min) / area_max * 100 if area_max > 0 else 0
 
             all_compliance.append({
                 "region": region,
@@ -204,6 +210,7 @@ def compute_compliance_per_region(df, output_dir, subject_id):
                 "area_range_mm2": area_max - area_min,
                 "area_cv_percent": (area_std / area_mean * 100) if area_mean > 0 else 0,
                 "compliance_percent": compliance,
+                "collapse_percent": collapse_pct,
             })
 
     if not all_compliance:
@@ -1231,97 +1238,453 @@ def generate_plane_reference(df, output_dir, subject_id):
 # PDF report (per region)
 # ---------------------------------------------------------------------------
 
-def generate_pdf_report(df, comp_df, output_dir, subject_id):
-    """Generate per-region PDF reports with key plots."""
+def _render_mesh_with_planes(full_mesh_path, centroids, plane_indices, output_png, region):
+    """Render full airway STL with region centerline and plane markers.
+
+    Shows the complete airway surface (nose + descending) for context,
+    with only the current region's centerline and plane labels drawn.
+    Plane 0 = trachea (bottom), last plane = nasopharynx (top).
+    """
+    import pyvista as pv
+
+    pv.OFF_SCREEN = True
+    mesh = pv.read(str(full_mesh_path))
+
+    plotter = pv.Plotter(off_screen=True, window_size=(800, 1600))
+    plotter.set_background("white")
+
+    # Full airway: semi-transparent for context
+    plotter.add_mesh(mesh, color="lightsteelblue", opacity=0.3, show_edges=False)
+
+    # Draw centerline through centroids (bold, visible)
+    if len(centroids) > 1:
+        cl_points = pv.PolyData(centroids)
+        lines = np.column_stack([
+            np.full(len(centroids) - 1, 2),
+            np.arange(len(centroids) - 1),
+            np.arange(1, len(centroids)),
+        ]).ravel()
+        cl_points.lines = lines
+        plotter.add_mesh(cl_points, color="navy", line_width=3)
+
+    # Add plane markers every 10 indices (less clutter)
+    label_points = []
+    label_texts = []
+    for i, pi in enumerate(plane_indices):
+        if int(pi) % 10 == 0:
+            cx, cy, cz = centroids[i]
+            sphere = pv.Sphere(radius=0.8, center=(cx, cy, cz))
+            plotter.add_mesh(sphere, color="red", opacity=0.9)
+            label_points.append((cx, cy, cz))
+            label_texts.append(str(int(pi)))
+
+    # Also mark first and last plane if not already included
+    for idx in [0, len(plane_indices) - 1]:
+        pi = plane_indices[idx]
+        if int(pi) % 10 != 0:
+            cx, cy, cz = centroids[idx]
+            sphere = pv.Sphere(radius=0.8, center=(cx, cy, cz))
+            plotter.add_mesh(sphere, color="darkred", opacity=0.9)
+            label_points.append((cx, cy, cz))
+            label_texts.append(str(int(pi)))
+
+    if label_points:
+        plotter.add_point_labels(
+            label_points, label_texts,
+            font_size=32, point_color="red", text_color="black",
+            shape=None, show_points=False, always_visible=True,
+            bold=True,
+        )
+
+    # Orient: sagittal view, full geometry visible
+    # trachea (plane 0) at bottom, nasopharynx at top
+    bounds = np.array(mesh.bounds)
+    center = np.array([
+        (bounds[0] + bounds[1]) / 2,
+        (bounds[2] + bounds[3]) / 2,
+        (bounds[4] + bounds[5]) / 2,
+    ])
+    extents = bounds[1::2] - bounds[::2]
+
+    # Sagittal view: camera along -X axis (flipped side view)
+    # Nose at top-left, trachea going down
+    cam_dist = max(extents) * 3.0
+
+    plotter.camera.position = (center[0] - cam_dist, center[1], center[2])
+    plotter.camera.focal_point = center
+    plotter.camera.up = (0, 0, 1)  # Z-up
+
+    # Fit entire mesh in view, zoom to fill the panel height
+    plotter.reset_camera()
+    plotter.camera.zoom(1.8)
+
+    plotter.screenshot(str(output_png))
+    plotter.close()
+
+
+def _make_wob_page(efd_path, subject_id):
+    """Create a Work of Breathing bar chart figure from EFDiff CSV."""
+    efd = pd.read_csv(efd_path)
+
+    # Clean column names
+    rename = {}
+    for col in efd.columns:
+        if col.strip().lower() == "time":
+            rename[col] = "Time"
+        else:
+            name = col.split("_Monitor_pts")[0]
+            if name.startswith("efd_"):
+                name = name[4:]
+            rename[col] = name
+    efd = efd.rename(columns=rename)
+    regions = [c for c in efd.columns if c != "Time"]
+
+    # Time-averaged |EFDiff|
+    efd_mean = {}
+    for r in regions:
+        efd_mean[r] = np.abs(efd[r].values).mean()
+    efd_mean = pd.Series(efd_mean).sort_values(ascending=True)
+    efd_total = efd_mean.sum()
+
+    colors = ["#e41a1c", "#377eb8", "#4daf4a", "#984ea3",
+              "#ff7f00", "#a65628", "#f781bf", "#999999"]
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+    fig.suptitle(
+        f"{subject_id} — Work of Breathing\n"
+        f"Total = {efd_total:.4f} W",
+        fontsize=14, fontweight="bold",
+    )
+
+    bar_colors = [colors[regions.index(r) % len(colors)]
+                  if r in regions else "gray"
+                  for r in efd_mean.index]
+    ax.barh(efd_mean.index, efd_mean.values, color=bar_colors, alpha=0.85)
+
+    for i, (val, name) in enumerate(zip(efd_mean.values, efd_mean.index)):
+        pct = val / efd_total * 100 if efd_total > 0 else 0
+        ax.text(val + efd_mean.max() * 0.02, i,
+                f"{val:.4f} W ({pct:.0f}%)", va="center", fontsize=10)
+
+    ax.set_xlabel("Mean |EFDiff| (W)", fontsize=12, fontweight="bold")
+    ax.set_title("Regional Energy Dissipation", fontsize=12)
+    ax.grid(True, alpha=0.3, axis="x")
+    ax.set_xlim(0, efd_mean.max() * 1.35)
+    ax.tick_params(axis="y", labelsize=11)
+
+    fig.text(
+        0.5, 0.005,
+        "Work of Breathing = time-averaged |EFDiff| per region. "
+        "Higher = more effort required to breathe through that region.",
+        ha="center", fontsize=8, color="gray", style="italic",
+    )
+    plt.tight_layout(rect=[0, 0.03, 1, 0.90])
+    return fig
+
+
+def generate_pdf_report(df, comp_df, output_dir, subject_id, efd_csv=None):
+    """Generate per-region single-page PDF reports.
+
+    Layout: 3 columns
+      Left:   STL mesh render with plane markers (pyvista)
+      Middle: CSA band (min/mean/max), y = plane index
+      Right:  Compliance bars (green/orange/red), y = plane index
+
+    Plane 0 = trachea (bottom), last plane = nasopharynx (top).
+    """
     regions = [r for r in df["region"].unique() if r != "NasalCombined"]
     has_frames = "frame_name" in df.columns
+
+    # Find mesh files for rendering
+    subject_dir = output_dir.parent
+    branches_dir = subject_dir / "branches"
 
     for region in regions:
         rdf = df[df["region"] == region]
         pdf_path = output_dir / f"{subject_id}_{region}_report.pdf"
 
-        with PdfPages(str(pdf_path)) as pdf:
-            # Page 1: CSA dynamics
-            frames = sorted(rdf["frame_name"].unique()) if has_frames else [None]
-            n_frames = len(frames)
-            cmap = plt.cm.viridis(np.linspace(0, 1, max(n_frames, 1)))
+        # --- Compute per-plane stats across all frames ---
+        plane_stats = rdf.groupby("plane_index").agg(
+            area_mean=("area_mm2", "mean"),
+            area_min=("area_mm2", "min"),
+            area_max=("area_mm2", "max"),
+            eq_diam_mean=("equivalent_diameter_mm", "mean"),
+            cx=("centroid_x", "mean"),
+            cy=("centroid_y", "mean"),
+            cz=("centroid_z", "mean"),
+        ).reset_index().sort_values("plane_index")
 
-            fig, ax = plt.subplots(figsize=(12, 6))
-            for fi, frame in enumerate(frames):
-                fdf = rdf[rdf["frame_name"] == frame] if frame else rdf
-                fdf = fdf.sort_values("plane_index")
-                ax.plot(fdf["plane_index"], fdf["area_mm2"],
-                       "-", color=cmap[fi], linewidth=0.8, alpha=0.6)
-            ax.set_xlabel("Plane Index")
-            ax.set_ylabel("CSA (mm²)")
-            ax.set_title(f"{subject_id} — {region} — CSA Dynamics ({n_frames} frames)")
-            ax.grid(True, alpha=0.3)
-            pdf.savefig(fig, bbox_inches="tight")
+        planes = plane_stats["plane_index"].values
+        n_planes = len(planes)
+        if n_planes == 0:
+            continue
+
+        # --- Column 1: Render STL mesh ---
+        mesh_png = output_dir / f"{subject_id}_{region}_mesh_render.png"
+
+        # Find the full airway surface mesh (show complete anatomy for context)
+        full_mesh_path = None
+        surface_dir = subject_dir / "surface"
+        if surface_dir.is_dir():
+            for candidate in ["wall_mm.stl", "wall.stl", "seg_0.stl"]:
+                if (surface_dir / candidate).exists():
+                    full_mesh_path = surface_dir / candidate
+                    break
+            if full_mesh_path is None:
+                surface_stls = list(surface_dir.glob("*.stl"))
+                if surface_stls:
+                    full_mesh_path = surface_stls[0]
+
+        centroids = plane_stats[["cx", "cy", "cz"]].values
+        mesh_image = None
+
+        if full_mesh_path is not None:
+            try:
+                _render_mesh_with_planes(
+                    full_mesh_path, centroids, planes, mesh_png, region,
+                )
+                mesh_image = plt.imread(str(mesh_png))
+            except Exception as e:
+                log.warning(f"  Mesh render failed for {region}: {e}")
+
+        # --- Compute summary findings ---
+        n_frames = len(rdf["frame_name"].unique()) if has_frames else 1
+        min_csa_idx = plane_stats.loc[plane_stats["area_mean"].idxmin()]
+        min_csa_plane = int(min_csa_idx["plane_index"])
+        min_csa_val = min_csa_idx["area_mean"]
+
+        # Compliance summary
+        n_high_risk = 0
+        max_comp_plane = None
+        max_comp_val = 0
+        if comp_df is not None:
+            rcomp = comp_df[comp_df["region"] == region]
+            if len(rcomp) > 0:
+                n_high_risk = int((rcomp["collapse_percent"] > 50).sum())
+                max_comp_row = rcomp.loc[rcomp["collapse_percent"].idxmax()]
+                max_comp_plane = int(max_comp_row["plane_index"])
+                max_comp_val = max_comp_row["collapse_percent"]
+
+        summary = f"Narrowest: Plane {min_csa_plane} (mean CSA = {min_csa_val:.1f} mm²)"
+        if max_comp_plane is not None:
+            summary += f"  |  Max collapse: Plane {max_comp_plane} ({max_comp_val:.0f}%)"
+            summary += f"  |  {n_high_risk}/{len(planes)} planes > 50% collapse"
+
+        # --- Build figure: 3 columns ---
+        fig = plt.figure(figsize=(20, 14))
+        fig.suptitle(
+            f"{subject_id} — {region} ({n_frames} frames)\n"
+            f"Plane 0 = Trachea (bottom), Plane {int(planes[-1])} = Nasopharynx (top)\n"
+            f"{summary}",
+            fontsize=12, fontweight="bold", y=0.99,
+        )
+
+        gs = fig.add_gridspec(1, 3, width_ratios=[1.3, 1.5, 1.0], wspace=0.12)
+
+        # ── Column 1: Mesh image ──
+        ax_geom = fig.add_subplot(gs[0])
+        if mesh_image is not None:
+            ax_geom.imshow(mesh_image, aspect="auto")
+            ax_geom.set_title("Anatomy (STL)", fontsize=10)
+        else:
+            ax_geom.text(0.5, 0.5, "Mesh not\navailable",
+                        transform=ax_geom.transAxes, ha="center", va="center",
+                        fontsize=12, color="gray")
+            ax_geom.set_title("Anatomy", fontsize=10)
+        ax_geom.axis("off")
+
+        # ── Column 2: CSA band (horizontal) ──
+        # y = plane index, 0 at bottom (trachea), max at top (nasopharynx)
+        ax_csa = fig.add_subplot(gs[1])
+        ax_csa.fill_betweenx(
+            planes, plane_stats["area_min"].values, plane_stats["area_max"].values,
+            alpha=0.3, color="steelblue", label="Min–Max",
+        )
+        ax_csa.plot(
+            plane_stats["area_mean"].values, planes,
+            "-", color="steelblue", linewidth=1.5, label="Mean",
+        )
+        ax_csa.set_xlabel("CSA (mm²)", fontsize=11)
+        ax_csa.set_ylabel("Plane Index\n(0 = Trachea → Nasopharynx)",
+                          fontsize=12, fontweight="bold")
+        ax_csa.set_title("Cross-Sectional Area", fontsize=11)
+        ax_csa.set_ylim(0, None)  # start from 0
+        ax_csa.set_xlim(0, None)  # start from 0
+        ax_csa.grid(True, alpha=0.3)
+        ax_csa.legend(fontsize=8, loc="upper right")
+        ax_csa.tick_params(axis='y', labelsize=11, width=1.5)
+
+        # ── Column 3: Tracheomalacia criterion ──
+        ax_comp = fig.add_subplot(gs[2], sharey=ax_csa)
+        if comp_df is not None:
+            rcomp = comp_df[comp_df["region"] == region].sort_values("plane_index")
+            if len(rcomp) > 0:
+                comp_vals = rcomp["collapse_percent"].values
+                comp_planes = rcomp["plane_index"].values
+                colors = [
+                    "red" if c > 70 else "orange" if c > 50 else "green"
+                    for c in comp_vals
+                ]
+                ax_comp.barh(comp_planes, comp_vals, color=colors, alpha=0.8, height=0.8)
+
+                # Color-banded background instead of just dashed lines
+                ax_comp.axvspan(0, 50, color="green", alpha=0.06)
+                ax_comp.axvspan(50, 70, color="orange", alpha=0.06)
+                ax_comp.axvspan(70, 100, color="red", alpha=0.06)
+                ax_comp.axvline(x=50, color="orange", linestyle="--", alpha=0.6, linewidth=1.0)
+                ax_comp.axvline(x=70, color="red", linestyle="--", alpha=0.6, linewidth=1.0)
+
+                # Threshold labels
+                ax_comp.text(25, planes[-1] * 0.02, "Normal", ha="center",
+                            fontsize=7, color="green", alpha=0.8)
+                ax_comp.text(60, planes[-1] * 0.02, "Moderate", ha="center",
+                            fontsize=7, color="orange", alpha=0.8)
+                ax_comp.text(85, planes[-1] * 0.02, "Severe", ha="center",
+                            fontsize=7, color="red", alpha=0.8)
+
+                ax_comp.set_xlim(0, 100)
+        ax_comp.set_xlabel("Airway Collapse (%)", fontsize=11)
+        ax_comp.set_title("Airway Collapse (%)", fontsize=11)
+        ax_comp.set_ylim(0, None)
+        ax_comp.grid(True, alpha=0.3, axis="x")
+        ax_comp.tick_params(axis='y', labelsize=11)
+
+        # Footnote
+        fig.text(
+            0.5, 0.005,
+            "Collapse = (CSAmax − CSAmin) / CSAmax × 100%.  "
+            "Normal < 50%  |  Moderate 50–70%  |  Severe > 70%.  "
+            "Collapse = (CSAmax − CSAmin) / CSAmax × 100%.",
+            ha="center", fontsize=8, color="gray", style="italic",
+        )
+
+
+        with PdfPages(str(pdf_path)) as pdf:
+            pdf.savefig(fig, bbox_inches="tight", dpi=150)
             plt.close()
 
-            # Page 2: Compliance
-            if comp_df is not None:
-                rcomp = comp_df[comp_df["region"] == region]
-                if len(rcomp) > 0:
-                    fig, ax = plt.subplots(figsize=(12, 5))
-                    colors = ["red" if c > 30 else "orange" if c > 15 else "green"
-                              for c in rcomp["compliance_percent"]]
-                    ax.bar(rcomp["plane_index"], rcomp["compliance_percent"],
-                           color=colors, alpha=0.8)
-                    ax.axhline(y=30, color="red", linestyle="--", alpha=0.5)
-                    ax.axhline(y=15, color="orange", linestyle="--", alpha=0.5)
-                    ax.set_xlabel("Plane Index")
-                    ax.set_ylabel("Compliance (%)")
-                    ax.set_title(f"{region} — Compliance / Collapse Risk")
-                    ax.grid(True, alpha=0.3)
-                    pdf.savefig(fig, bbox_inches="tight")
-                    plt.close()
+            # Page 2: Work of Breathing (Joules per cycle, inhale vs exhale)
+            if efd_csv is None:
+                subject_dir = output_dir.parent
+                for search_dir in [subject_dir, subject_dir.parent]:
+                    for candidate in list(search_dir.glob(f"{subject_id}_EFDiff*.csv")) + \
+                                     list(search_dir.glob("*EFDiff*.csv")):
+                        if candidate.exists():
+                            efd_csv = candidate
+                            break
+                    if efd_csv:
+                        break
 
-            # Page 3: Circularity
-            if "circularity" in rdf.columns and has_frames:
-                plane_stats = rdf.groupby("plane_index").agg(
-                    circ_mean=("circularity", "mean"),
-                    circ_std=("circularity", "std"),
-                ).reset_index()
+            if efd_csv is not None and Path(efd_csv).exists():
+                try:
+                    from plot_tpl_efd import load_and_clean
+                    from scipy.integrate import trapezoid
 
-                fig, ax = plt.subplots(figsize=(12, 5))
-                ax.fill_between(plane_stats["plane_index"],
-                               plane_stats["circ_mean"] - plane_stats["circ_std"],
-                               plane_stats["circ_mean"] + plane_stats["circ_std"],
-                               alpha=0.3, color="steelblue")
-                ax.plot(plane_stats["plane_index"], plane_stats["circ_mean"],
-                       "-", color="steelblue", linewidth=1.5)
-                ax.set_xlabel("Plane Index")
-                ax.set_ylabel("Circularity (1.0 = circle)")
-                ax.set_title(f"{region} — Cross-Section Circularity")
-                ax.set_ylim(0, 1.1)
-                ax.grid(True, alpha=0.3)
-                pdf.savefig(fig, bbox_inches="tight")
-                plt.close()
+                    efd_full = load_and_clean(efd_csv, "efd_")
+                    time_efd = efd_full["Time"].values
+                    efd_regions_full = [c for c in efd_full.columns if c != "Time"]
 
-            # Page 4: Heatmap
-            if has_frames:
-                planes = sorted(rdf["plane_index"].unique())
-                frame_indices = sorted(rdf["frame_index"].unique())
-                if len(frame_indices) >= 2:
-                    matrix = np.full((len(planes), len(frame_indices)), np.nan)
-                    pmap = {p: i for i, p in enumerate(planes)}
-                    fmap = {f: i for i, f in enumerate(frame_indices)}
-                    for _, row in rdf.iterrows():
-                        pi = pmap.get(row["plane_index"])
-                        fi = fmap.get(row["frame_index"])
-                        if pi is not None and fi is not None:
-                            matrix[pi, fi] = row["area_mm2"]
+                    # Switch time (hardcoded for now — TODO: parameterize)
+                    switch_time = 1.6
+                    if not (time_efd[0] < switch_time < time_efd[-1]):
+                        switch_time = None
 
-                    fig, ax = plt.subplots(figsize=(12, 8))
-                    im = ax.imshow(matrix, aspect="auto", cmap="YlOrRd",
-                                  interpolation="nearest", origin="lower")
-                    ax.set_xlabel("Frame Index")
-                    ax.set_ylabel("Plane Index")
-                    ax.set_title(f"{region} — CSA Heatmap")
-                    plt.colorbar(im, ax=ax, label="CSA (mm²)")
-                    pdf.savefig(fig, bbox_inches="tight")
-                    plt.close()
+                    if switch_time is not None:
+                        inhale_mask = time_efd <= switch_time
+                        exhale_mask = time_efd > switch_time
+
+                        def _integrate(values, time, mask):
+                            t_m, v_m = time[mask], np.abs(values[mask])
+                            return trapezoid(v_m, t_m) if len(t_m) >= 2 else 0.0
+
+                        wob_rows = []
+                        for r in efd_regions_full:
+                            vals = efd_full[r].values
+                            e_total = _integrate(vals, time_efd, np.ones(len(time_efd), bool))
+                            e_inh = _integrate(vals, time_efd, inhale_mask)
+                            e_exh = _integrate(vals, time_efd, exhale_mask)
+                            wob_rows.append({"region": r, "total_J": e_total,
+                                             "inhale_J": e_inh, "exhale_J": e_exh})
+
+                        wob_df = pd.DataFrame(wob_rows).set_index("region").sort_values("total_J", ascending=True)
+                        total_e = wob_df["total_J"].sum()
+                        inh_e = wob_df["inhale_J"].sum()
+                        exh_e = wob_df["exhale_J"].sum()
+
+                        colors_wob = ["#e41a1c", "#377eb8", "#4daf4a", "#984ea3",
+                                      "#ff7f00", "#a65628", "#f781bf", "#999999"]
+
+                        fig_wob, (ax_t, ax_p) = plt.subplots(1, 2, figsize=(18, 7),
+                            gridspec_kw={"width_ratios": [1.0, 1.5]})
+                        fig_wob.suptitle(
+                            f"{subject_id} — Work of Breathing (Energy per Cycle)\n"
+                            f"Total = {total_e:.4f} J  |  "
+                            f"Inhale = {inh_e:.4f} J (0–{switch_time}s)  |  "
+                            f"Exhale = {exh_e:.4f} J ({switch_time}–{time_efd[-1]:.1f}s)",
+                            fontsize=13, fontweight="bold")
+
+                        # Left: total per cycle
+                        bc = [colors_wob[efd_regions_full.index(r) % len(colors_wob)]
+                              if r in efd_regions_full else "gray" for r in wob_df.index]
+                        ax_t.barh(wob_df.index, wob_df["total_J"], color=bc, alpha=0.85)
+                        for i, (r, row) in enumerate(wob_df.iterrows()):
+                            pct = row["total_J"] / total_e * 100 if total_e > 0 else 0
+                            ax_t.text(row["total_J"] + wob_df["total_J"].max() * 0.02, i,
+                                      f"{row['total_J']:.4f} J ({pct:.0f}%)", va="center", fontsize=9)
+                        ax_t.set_xlabel("Energy per Cycle (J)", fontsize=11, fontweight="bold")
+                        ax_t.set_title("Total (Full Cycle)", fontsize=11)
+                        ax_t.grid(True, alpha=0.3, axis="x")
+                        ax_t.set_xlim(0, wob_df["total_J"].max() * 1.4)
+                        ax_t.tick_params(axis="y", labelsize=11)
+
+                        # Right: inhale vs exhale
+                        y_pos = np.arange(len(wob_df))
+                        bh = 0.35
+                        ax_p.barh(y_pos + bh/2, wob_df["inhale_J"], height=bh,
+                                  color="steelblue", alpha=0.8, label=f"Inhale (0–{switch_time}s)")
+                        ax_p.barh(y_pos - bh/2, wob_df["exhale_J"], height=bh,
+                                  color="coral", alpha=0.8, label=f"Exhale ({switch_time}–{time_efd[-1]:.1f}s)")
+                        for i, (r, row) in enumerate(wob_df.iterrows()):
+                            ip = row["inhale_J"] / inh_e * 100 if inh_e > 0 else 0
+                            ep = row["exhale_J"] / exh_e * 100 if exh_e > 0 else 0
+                            ax_p.text(row["inhale_J"] + wob_df["inhale_J"].max() * 0.02,
+                                      i + bh/2, f"{ip:.0f}% ({row['inhale_J']:.4f} J)",
+                                      va="center", fontsize=8, color="steelblue")
+                            ax_p.text(row["exhale_J"] + wob_df["exhale_J"].max() * 0.02,
+                                      i - bh/2, f"{ep:.0f}% ({row['exhale_J']:.4f} J)",
+                                      va="center", fontsize=8, color="coral")
+                        ax_p.set_yticks(y_pos)
+                        ax_p.set_yticklabels(wob_df.index, fontsize=11)
+                        ax_p.set_xlabel("Energy per Phase (J)", fontsize=11, fontweight="bold")
+                        ax_p.set_title("Inhale vs Exhale", fontsize=11)
+                        ax_p.legend(fontsize=9, loc="lower right")
+                        ax_p.grid(True, alpha=0.3, axis="x")
+
+                        # Summary
+                        top_t = wob_df["total_J"].idxmax()
+                        top_tp = wob_df.loc[top_t, "total_J"] / total_e * 100
+                        top_i = wob_df["inhale_J"].idxmax()
+                        top_ip = wob_df.loc[top_i, "inhale_J"] / inh_e * 100
+                        top_e = wob_df["exhale_J"].idxmax()
+                        top_ep = wob_df.loc[top_e, "exhale_J"] / exh_e * 100
+                        ir = inh_e / exh_e if exh_e > 0 else 0
+                        summary = (
+                            f"The {top_t} accounts for {top_tp:.0f}% of total energy dissipation ({total_e:.3f} J/cycle). "
+                            f"Inhalation requires {ir:.1f}× more energy than exhalation. "
+                            f"During inhale, {top_i} dominates ({top_ip:.0f}%); "
+                            f"during exhale, {top_e} dominates ({top_ep:.0f}%).")
+                        fig_wob.text(0.5, 0.035, summary, ha="center", fontsize=9,
+                                     fontweight="bold", color="black")
+                        fig_wob.text(0.5, 0.005,
+                            f"WoB = ∫|EFDiff|dt (Joules per cycle).  "
+                            f"Inhale + Exhale = Total ({inh_e:.4f} + {exh_e:.4f} = {inh_e+exh_e:.4f} J).",
+                            ha="center", fontsize=8, color="gray", style="italic")
+                        plt.tight_layout(rect=[0, 0.05, 1, 0.90])
+                        pdf.savefig(fig_wob, bbox_inches="tight", dpi=150)
+                        plt.close()
+                        log.info(f"  Added WoB page (J/cycle, switch={switch_time}s)")
+                except Exception as e:
+                    log.warning(f"  WoB page failed: {e}")
 
         log.info(f"  PDF report: {pdf_path.name}")
 

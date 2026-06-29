@@ -204,7 +204,7 @@ def extract_centerlines(surface: vtk.vtkPolyData,
     capper = vmtkscripts.vmtkSurfaceCapper()
     capper.Surface = surface
     capper.Interactive = 0
-    capper.Method = "simple"
+    capper.Method = "centerpoint"
     capper.Execute()
     capped = capper.Surface
 
@@ -240,6 +240,15 @@ def extract_centerlines(surface: vtk.vtkPolyData,
 
 def smooth_centerlines(centerlines: vtk.vtkPolyData) -> vtk.vtkPolyData:
     print("\n--- Smoothing centerlines ---")
+    # Save original endpoints before smoothing
+    endpoints = []
+    for i in range(centerlines.GetNumberOfCells()):
+        cell = centerlines.GetCell(i)
+        n = cell.GetNumberOfPoints()
+        p0 = list(centerlines.GetPoint(cell.GetPointId(0)))
+        pn = list(centerlines.GetPoint(cell.GetPointId(n - 1)))
+        endpoints.append((cell.GetPointId(0), p0, cell.GetPointId(n - 1), pn))
+
     geom = vmtkscripts.vmtkCenterlineGeometry()
     geom.Centerlines = centerlines
     geom.Smoothing = 1
@@ -247,7 +256,17 @@ def smooth_centerlines(centerlines: vtk.vtkPolyData) -> vtk.vtkPolyData:
     geom.SmoothingFactor = 0.2
     geom.OutputSmoothed = 1
     geom.Execute()
-    return geom.Centerlines
+    smoothed = geom.Centerlines
+
+    # Restore original endpoints (smoothing shrinks them inward)
+    pts = smoothed.GetPoints()
+    for pid0, p0, pidn, pn in endpoints:
+        pts.SetPoint(pid0, p0)
+        pts.SetPoint(pidn, pn)
+    smoothed.Modified()
+    print("  Restored original endpoints after smoothing")
+
+    return smoothed
 
 
 def extract_branches(centerlines: vtk.vtkPolyData) -> vtk.vtkPolyData:
@@ -295,6 +314,8 @@ def extract_centerline_cell(centerlines: vtk.vtkPolyData, cell_idx: int) -> np.n
 
 def trim_centerline(points: np.ndarray, trim_n: int = 5) -> np.ndarray:
     """Trim points from both ends of a centerline to stay inside the lumen."""
+    if trim_n == 0:
+        return points
     if len(points) <= 2 * trim_n:
         return points
     return points[trim_n:-trim_n]
@@ -305,7 +326,7 @@ def cap_surface(surface: vtk.vtkPolyData) -> vtk.vtkPolyData:
     capper = vmtkscripts.vmtkSurfaceCapper()
     capper.Surface = surface
     capper.Interactive = 0
-    capper.Method = "simple"
+    capper.Method = "centerpoint"
     capper.Execute()
     capped = capper.Surface
     n_added = capped.GetNumberOfCells() - surface.GetNumberOfCells()
@@ -598,6 +619,18 @@ class AirwayBranchDetector:
         centerlines = extract_centerlines(
             surface, profiles, source_ids, target_ids, self.resampling_step)
 
+        # Save raw endpoints before any processing
+        _raw_endpoints = {}
+        for i in range(centerlines.GetNumberOfCells()):
+            cell = centerlines.GetCell(i)
+            n = cell.GetNumberOfPoints()
+            _raw_endpoints[i] = {
+                'start_id': cell.GetPointId(0),
+                'start_pt': list(centerlines.GetPoint(cell.GetPointId(0))),
+                'end_id': cell.GetPointId(n - 1),
+                'end_pt': list(centerlines.GetPoint(cell.GetPointId(n - 1))),
+            }
+
         # Step 4: Smooth
         centerlines = smooth_centerlines(centerlines)
 
@@ -625,9 +658,59 @@ class AirwayBranchDetector:
                 print(f"  WARNING: No centerline cell for {label}")
                 continue
             pts = extract_centerline_cell(centerlines, i)
-            full_paths[label] = trim_centerline(pts, trim_n=5)
+            full_paths[label] = trim_centerline(pts, trim_n=0)
 
-        # Save combined trimmed centerlines
+        # Smooth and resample each centerline to uniform 1mm before saving
+        from scipy.interpolate import interp1d
+        from scipy.ndimage import uniform_filter1d
+        for label, pts in full_paths.items():
+            if len(pts) < 4:
+                continue
+            start_pt, end_pt = pts[0].copy(), pts[-1].copy()
+            # Moving average smooth (window=5), pin endpoints
+            for axis in range(3):
+                pts[:, axis] = uniform_filter1d(pts[:, axis], size=min(5, len(pts)))
+            pts[0], pts[-1] = start_pt, end_pt
+            # Resample to uniform 1mm
+            diffs = np.linalg.norm(np.diff(pts, axis=0), axis=1)
+            arc = np.concatenate([[0], np.cumsum(diffs)])
+            total_len = arc[-1]
+            if total_len > 0:
+                n_new = max(int(total_len / 1.0), 5)
+                t_uniform = np.linspace(0, total_len, n_new)
+                pts = interp1d(arc, pts, axis=0, kind='cubic')(t_uniform)
+                pts[0], pts[-1] = start_pt, end_pt
+            full_paths[label] = pts
+
+        # Reorder branches by arc-length position along the longest (MainAorta) centerline
+        # Find the longest centerline (= MainAorta = Trunk + dAo)
+        longest_label = max(full_paths, key=lambda k: len(full_paths[k]))
+        longest_pts = full_paths[longest_label]
+        from scipy.spatial import cKDTree as _cKDTree
+        main_tree = _cKDTree(longest_pts)
+
+        # Map each branch's endpoint to arc length on MainAorta
+        branch_order = []
+        main_diffs = np.linalg.norm(np.diff(longest_pts, axis=0), axis=1)
+        main_arc = np.concatenate([[0], np.cumsum(main_diffs)])
+        for label, pts in full_paths.items():
+            _, idx = main_tree.query(pts[-1])  # endpoint
+            branch_order.append((label, float(main_arc[idx])))
+        branch_order.sort(key=lambda x: x[1])
+
+        # Create rename map: VMTK name → ordered name (Branch_1, Branch_2, ...)
+        rename_map = {}
+        for i, (old_label, arc) in enumerate(branch_order):
+            new_label = f"Branch_{i+1}"
+            rename_map[old_label] = new_label
+            print(f"  {new_label} (was {old_label}): arc={arc:.1f}mm")
+
+        # Apply renaming to full_paths, target_labels, surface_partitions
+        full_paths = {rename_map.get(k, k): v for k, v in full_paths.items()}
+        surface_partitions = {rename_map.get(k, k): v for k, v in surface_partitions.items()}
+        target_labels = [rename_map.get(t, t) for t in target_labels]
+
+        # Save combined centerlines
         all_parts = [centerline_to_vtp(pts) for pts in full_paths.values()]
         if all_parts:
             appender = vtk.vtkAppendPolyData()

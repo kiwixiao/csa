@@ -14,6 +14,7 @@ Usage:
 """
 
 import sys
+import os
 import argparse
 import glob
 import logging
@@ -22,6 +23,7 @@ import numpy as np
 import pandas as pd
 from pathlib import Path
 from collections import defaultdict
+from concurrent.futures import ProcessPoolExecutor, as_completed
 
 sys.path.insert(0, str(Path(__file__).parent))
 from slicer.io_utils import read_stl, read_vtk_centerline
@@ -34,6 +36,47 @@ from interpolate_frames import generate_motion_frames
 
 
 log = logging.getLogger(__name__)
+
+
+def _process_frame(args_tuple):
+    """Worker function for parallel frame processing."""
+    (fi, stl_file, frame_output, left_cl_f0, right_cl_f0,
+     cl_left_dir, cl_right_dir, cl_midline_dir, refine_result) = args_tuple
+
+    frame_name = Path(stl_file).stem
+
+    # Nose CLs: use frame 0 (nose doesn't move)
+    left_cl = left_cl_f0
+    right_cl = right_cl_f0
+
+    # Check for morphed nose CLs
+    left_cl_file = Path(cl_left_dir) / f"{frame_name}.vtk"
+    right_cl_file = Path(cl_right_dir) / f"{frame_name}.vtk"
+    if left_cl_file.exists():
+        left_cl = read_vtk_centerline(str(left_cl_file))
+    if right_cl_file.exists():
+        right_cl = read_vtk_centerline(str(right_cl_file))
+
+    # Midline CL: always use deformed version
+    midline_cl_file = Path(cl_midline_dir) / f"{frame_name}.vtk"
+    midline_cl = read_vtk_centerline(str(midline_cl_file)) if midline_cl_file.exists() else None
+
+    rows = run_single_frame(
+        stl_path=str(stl_file),
+        output_dir=str(frame_output),
+        name=frame_name,
+        refine_result=refine_result,
+        left_cl=left_cl,
+        right_cl=right_cl,
+        midline_cl=midline_cl,
+        log=None,
+    )
+
+    for row in rows:
+        row["frame_name"] = frame_name
+        row["frame_index"] = fi
+
+    return fi, frame_name, rows
 
 
 def find_surface_stl(subject_dir):
@@ -183,47 +226,45 @@ def main():
     all_frame_rows = []
     frame_plane_indices = defaultdict(lambda: defaultdict(set))
 
+    # Build task list for parallel processing
+    tasks = []
     for fi, stl_file in enumerate(stl_files):
         frame_name = stl_file.stem
         frame_output = output_dir / "frames" / frame_name
-        logger.info(f"\n  Frame {fi+1}/{len(stl_files)}: {frame_name}")
+        tasks.append((
+            fi, str(stl_file), str(frame_output),
+            left_cl_f0, right_cl_f0,
+            str(cl_left_dir), str(cl_right_dir), str(cl_midline_dir),
+            refine_result,
+        ))
 
-        # Nose CLs: use frame 0 (nose doesn't move)
-        left_cl = left_cl_f0
-        right_cl = right_cl_f0
+    try:
+        available = len(os.sched_getaffinity(0))
+    except AttributeError:
+        available = os.cpu_count() or 1
+    n_workers = min(available, len(tasks))
+    logger.info(f"  Processing {len(tasks)} frames with {n_workers} workers ({available} cores available)")
 
-        # Check for morphed nose CLs (if morph_nose was True)
-        left_cl_file = cl_left_dir / f"{frame_name}.vtk"
-        right_cl_file = cl_right_dir / f"{frame_name}.vtk"
-        if left_cl_file.exists():
-            left_cl = read_vtk_centerline(str(left_cl_file))
-        if right_cl_file.exists():
-            right_cl = read_vtk_centerline(str(right_cl_file))
-
-        # Midline CL: always use deformed version (descending airway moves)
-        midline_cl_file = cl_midline_dir / f"{frame_name}.vtk"
-        midline_cl = read_vtk_centerline(str(midline_cl_file)) if midline_cl_file.exists() else None
-
-        # Slice this frame
-        rows = run_single_frame(
-            stl_path=str(stl_file),
-            output_dir=str(frame_output),
-            name=frame_name,
-            refine_result=refine_result,
-            left_cl=left_cl,
-            right_cl=right_cl,
-            midline_cl=midline_cl,
-            log=logger,
-        )
-
-        # Add frame metadata
-        for row in rows:
-            row["frame_name"] = frame_name
-            row["frame_index"] = fi
-            # Track plane indices per region per frame
-            frame_plane_indices[row["region"]][fi].add(row["plane_index"])
-
-        all_frame_rows.extend(rows)
+    if n_workers <= 1:
+        # Sequential fallback
+        for task in tasks:
+            fi, frame_name, rows = _process_frame(task)
+            logger.info(f"  Frame {fi+1}/{len(tasks)}: {frame_name}")
+            for row in rows:
+                frame_plane_indices[row["region"]][fi].add(row["plane_index"])
+            all_frame_rows.extend(rows)
+    else:
+        # Parallel processing
+        completed = 0
+        with ProcessPoolExecutor(max_workers=n_workers) as executor:
+            futures = {executor.submit(_process_frame, t): t[0] for t in tasks}
+            for future in as_completed(futures):
+                fi, frame_name, rows = future.result()
+                completed += 1
+                logger.info(f"  Completed {completed}/{len(tasks)}: {frame_name}")
+                for row in rows:
+                    frame_plane_indices[row["region"]][fi].add(row["plane_index"])
+                all_frame_rows.extend(rows)
 
     logger.info(f"\n  Total rows across all frames: {len(all_frame_rows)}")
 

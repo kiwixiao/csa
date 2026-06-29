@@ -52,6 +52,11 @@ slice_test/
 # Lock files
 .~lock.*
 
+# Backup / scratch files
+*.backup
+*.new
+*.orig
+
 # Build artifacts
 build/
 dist/
