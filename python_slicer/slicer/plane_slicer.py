@@ -382,55 +382,6 @@ class AirwaySlicer:
             side=largest_cs.side
         )
 
-    def _select_best_section(self,
-                            cross_sections: List[CrossSection],
-                            centerline_point: np.ndarray) -> Optional[CrossSection]:
-        """
-        Select best cross-section from multiple candidates
-
-        Replaces: Selection logic in trachSlice_OSA_AB_3.m (lines 136-173)
-
-        MATLAB logic prioritizes:
-        1. If only one section exists, use it
-        2. If multiple sections, choose the one closest to centerline
-        3. If centroids are equally close, choose larger area
-
-        Args:
-            cross_sections: List of candidate cross-sections
-            centerline_point: Centerline point for comparison
-
-        Returns:
-            Best CrossSection or None
-        """
-        if not cross_sections:
-            return None
-
-        if len(cross_sections) == 1:
-            return cross_sections[0]
-
-        # Multiple sections - choose based on distance and area
-        best_section = None
-        best_distance = float('inf')
-        best_area = 0.0
-
-        for section in cross_sections:
-            distance = np.linalg.norm(section.centroid - centerline_point)
-
-            # If this is closer, it wins
-            if distance < best_distance:
-                best_section = section
-                best_distance = distance
-                best_area = section.area
-            # If equally close (within 2mm), choose larger area
-            # Replaces lines 150-155 in trachSlice_OSA_AB_3.m
-            elif abs(distance - best_distance) < 2.0:
-                if section.area > best_area:
-                    best_section = section
-                    best_distance = distance
-                    best_area = section.area
-
-        return best_section
-
     def export_results(self,
                       results: SlicingResults,
                       output_base_name: str,

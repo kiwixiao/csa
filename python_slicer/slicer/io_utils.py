@@ -8,7 +8,7 @@ import trimesh
 import pyvista as pv
 import pandas as pd
 from pathlib import Path
-from typing import Tuple, Dict, Any
+from typing import Dict, Any
 
 
 def read_stl(filepath: str) -> trimesh.Trimesh:

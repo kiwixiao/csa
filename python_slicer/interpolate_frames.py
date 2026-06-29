@@ -178,13 +178,23 @@ def interpolate_mesh(
 
     # Stack and build cubic spline interpolator
     mesh_points = np.stack(mesh_points, axis=0)
+    # Cubic spline needs >= 4 samples; fall back to linear otherwise
+    kind = "cubic" if len(time_points) >= 4 else "linear"
     interpolator = scipy.interpolate.interp1d(
         time_points, mesh_points, axis=0,
-        bounds_error=True, assume_sorted=True, kind="cubic",
+        bounds_error=True, assume_sorted=True, kind=kind,
     )
 
-    # Generate output frames
+    # Generate output frames, restricted to the interpolation domain.
     ts = np.arange(start, stop + step, step)
+    tol = abs(step) * 1e-6
+    ts = ts[(ts >= time_points[0] - tol) & (ts <= time_points[-1] + tol)]
+    ts = np.clip(ts, time_points[0], time_points[-1])
+    if len(ts) == 0:
+        raise ValueError(
+            f"Requested time range [{start}, {stop}] does not overlap DOF span "
+            f"[{time_points[0]}, {time_points[-1]}]"
+        )
     output_paths = []
     for t in ts:
         points = interpolator(t)
@@ -311,7 +321,6 @@ def generate_motion_frames(
         log.info(f"  Reference: {ref_cl.GetNumberOfPoints()} pts")
 
         # Determine file type from input
-        suffix = cl_path.suffix  # .vtk or .vtp
         out_suffix = ".vtk"  # always output VTK for consistency
 
         interpolate_mesh(

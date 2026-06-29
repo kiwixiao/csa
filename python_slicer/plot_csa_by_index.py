@@ -427,6 +427,7 @@ def plot_csa_by_index_cycle_flipped_labeled(data_dict: Dict[str, pd.DataFrame],
 
     # Use first phase to get plane indices for labeling
     first_df = data_dict[file_ids[0]]
+    all_plane_indices = np.array([])
     if 'plane_index' in first_df.columns:
         df_sorted = first_df.sort_values('plane_index')
         all_plane_indices = df_sorted['plane_index'].values[::-1]  # Flipped

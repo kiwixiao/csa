@@ -99,7 +99,11 @@ def compute_plane_normal(stl_path: str) -> np.ndarray:
             return np.array([0, 0, 1])
 
         weighted_normal = np.average(normals, axis=0, weights=areas)
-        weighted_normal /= np.linalg.norm(weighted_normal)
+        norm = np.linalg.norm(weighted_normal)
+        if norm > 0:
+            weighted_normal = weighted_normal / norm
+        else:
+            weighted_normal = np.array([0, 0, 1])
 
         return weighted_normal
     except Exception:

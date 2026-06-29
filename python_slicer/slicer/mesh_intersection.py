@@ -207,14 +207,22 @@ class MeshPlaneSlicer:
             except Exception as e:
                 continue
 
-        # BUG: Single polygon skips containment check. If the plane produces
-        # one big loop that wraps both lumens (e.g., aortic arch), it passes
-        # even when the CL point is outside. Also, the multi-loop path below
-        # checks containment but returns ALL loops instead of filtering.
-        # Aortic pipeline bypasses this via _slice_with_containment().
-        # TODO: Fix by always checking containment and returning only matching loops.
-        if len(all_polygons) <= 1:
+        # Handle the trivial cases up front.
+        if len(all_polygons) == 0:
             return all_polygons
+
+        # Single loop: still verify it contains the centerline, mirroring the
+        # multi-loop rejection below. A lone loop that excludes the centerline
+        # is a tangential / cross-lumen cut and must be rejected.
+        if len(all_polygons) == 1:
+            entity = slice_result_3d.entities[polygon_metadata[0]]
+            vertices_3d = slice_result_3d.vertices[entity.points]
+            vertices_2d_custom = self._project_to_plane_2d(
+                vertices_3d, plane_origin, plane_normal)
+            polygon_custom = Polygon(vertices_2d_custom)
+            if polygon_custom.is_valid and polygon_custom.contains(Point(0.0, 0.0)):
+                return all_polygons
+            return []
 
         # Multiple loops detected - verify that at least one contains the centerline
         # Use our custom 3D-to-2D projection to check which loop contains the centerline
@@ -336,11 +344,7 @@ class MeshPlaneSlicer:
             for polygon in polygons:
                 centroid = np.array(polygon.centroid.coords[0])
 
-                # Add Z=0 if 2D centroid
-                if len(centroid) == 2:
-                    centroid_x = centroid[0]
-                else:
-                    centroid_x = centroid[0]
+                centroid_x = centroid[0]
 
                 if centroid_x > plane_origin[0]:
                     # Left nostril
@@ -511,23 +515,22 @@ class MeshPlaneSlicer:
             if len(unique_vertices) < 3:
                 return None
 
-            # Perform Delaunay triangulation
+            # Perform Delaunay triangulation on de-duplicated vertices
             tri = Delaunay(unique_vertices)
 
-            return tri.simplices
+            # unique_indices[orig] = index into unique_vertices for original vertex `orig`.
+            # Build the inverse so simplices reference the ORIGINAL `vertices` array,
+            # which is what the caller (_triangulate_polygon) indexes against.
+            inverse_map = np.empty(len(unique_vertices), dtype=int)
+            for original_idx, unique_idx in enumerate(unique_indices):
+                inverse_map[unique_idx] = original_idx
+            return inverse_map[tri.simplices]
 
-        except Exception as e:
-            # Retry with simplified vertices (MATLAB retry logic)
-            try:
-                # Remove closest vertices and try again
-                simplified_vertices = self._simplify_vertices(vertices)
-                if len(simplified_vertices) >= 3:
-                    tri = Delaunay(simplified_vertices)
-                    return tri.simplices
-                else:
-                    return None
-            except Exception:
-                return None
+        except Exception:
+            # Retrying on a simplified (shrunken) vertex array would return
+            # simplices that index a different-length array than the caller's
+            # vertices_2d, producing mis-mapped triangles. Skip the plane instead.
+            return None
 
     def _remove_duplicate_vertices(self,
                                    vertices: np.ndarray,

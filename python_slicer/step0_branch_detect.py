@@ -96,8 +96,6 @@ To create the vmtk environment:
         cmd.extend(["--subject-id", args.subject_id])
     if args.resampling_step != 2.0:
         cmd.extend(["--resampling-step", str(args.resampling_step)])
-    if args.verbose:
-        cmd.append("--verbose")
 
     print(f"\nRunning branch detection...")
     print(f"  Input: {stl_path}")

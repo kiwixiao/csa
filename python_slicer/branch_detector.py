@@ -417,8 +417,6 @@ def assign_surface_partitions(group_info: Dict,
     """
     print(f"\n--- Assigning surface partitions ---")
 
-    n_centerlines = max(max(info["centerline_ids"]) for info in group_info.values()) + 1
-
     # Find terminal GroupIds (Blanking=0) closest to each profile barycenter
     branch_gids = [gid for gid, info in group_info.items() if info["blanking"] == 0]
 
@@ -618,18 +616,6 @@ class AirwayBranchDetector:
         # Step 3: Extract centerlines (single VMTK call)
         centerlines = extract_centerlines(
             surface, profiles, source_ids, target_ids, self.resampling_step)
-
-        # Save raw endpoints before any processing
-        _raw_endpoints = {}
-        for i in range(centerlines.GetNumberOfCells()):
-            cell = centerlines.GetCell(i)
-            n = cell.GetNumberOfPoints()
-            _raw_endpoints[i] = {
-                'start_id': cell.GetPointId(0),
-                'start_pt': list(centerlines.GetPoint(cell.GetPointId(0))),
-                'end_id': cell.GetPointId(n - 1),
-                'end_pt': list(centerlines.GetPoint(cell.GetPointId(n - 1))),
-            }
 
         # Step 4: Smooth
         centerlines = smooth_centerlines(centerlines)

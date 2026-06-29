@@ -48,27 +48,6 @@ def load_and_clean(csv_path, prefix):
     return df[keep]
 
 
-def plot_raw_lines(ax, df, time, regions, title, ylabel, colors, smooth_window=0):
-    """Plot raw regional values as time series lines."""
-    for i, region in enumerate(regions):
-        if region in df.columns:
-            vals = df[region].values
-            if smooth_window > 1:
-                vals = pd.Series(vals).rolling(
-                    window=smooth_window, center=True, min_periods=1
-                ).mean().values
-            ax.plot(time, vals, label=region,
-                    color=colors[i % len(colors)], linewidth=1.2, alpha=0.8)
-
-    ax.set_xlabel("Time (s)", fontsize=11)
-    ax.set_ylabel(ylabel, fontsize=11)
-    ax.set_title(title, fontsize=12, fontweight="bold")
-    ax.legend(fontsize=8, loc="best", ncol=2)
-    ax.grid(True, alpha=0.3)
-    ax.set_xlim(time.min(), time.max())
-    ax.axhline(y=0, color="black", linewidth=0.5, alpha=0.3)
-
-
 def main():
     parser = argparse.ArgumentParser(
         description="Plot regional TPL and EFDiff as % of total"
@@ -118,9 +97,6 @@ def main():
     # Identify regions
     tpl_regions = [c for c in tpl.columns if c not in ("Time", "Nose")]
     efd_regions = [c for c in efd.columns if c != "Time"]
-
-    # Smooth window
-    smooth = max(len(time_tpl) // 200, 3)
 
     colors = ["#e41a1c", "#377eb8", "#4daf4a", "#984ea3",
               "#ff7f00", "#a65628", "#f781bf", "#999999"]
@@ -229,13 +205,13 @@ def main():
 
     # Summary sentence for clinicians
     top_total = wob["total_J"].idxmax()
-    top_total_pct = wob.loc[top_total, "total_J"] / total_e * 100
+    top_total_pct = (wob.loc[top_total, "total_J"] / total_e * 100) if total_e > 0 else 0.0
 
     top_inhale = wob["inhale_J"].idxmax()
-    top_inhale_pct = wob.loc[top_inhale, "inhale_J"] / inhale_e * 100
+    top_inhale_pct = (wob.loc[top_inhale, "inhale_J"] / inhale_e * 100) if inhale_e > 0 else 0.0
 
     top_exhale = wob["exhale_J"].idxmax()
-    top_exhale_pct = wob.loc[top_exhale, "exhale_J"] / exhale_e * 100
+    top_exhale_pct = (wob.loc[top_exhale, "exhale_J"] / exhale_e * 100) if exhale_e > 0 else 0.0
 
     inhale_ratio = inhale_e / exhale_e if exhale_e > 0 else 0
 

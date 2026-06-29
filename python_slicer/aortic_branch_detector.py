@@ -141,7 +141,7 @@ class AorticBranchDetector:
         if desc_dir.exists() and not trunk_dir.exists():
             shutil.move(str(desc_dir), str(trunk_dir))
             # Rename files inside
-            for f in trunk_dir.iterdir():
+            for f in list(trunk_dir.iterdir()):
                 new_name = f.name.replace("DescendingAirway", "Trunk")
                 if new_name != f.name:
                     f.rename(trunk_dir / new_name)
@@ -151,7 +151,7 @@ class AorticBranchDetector:
         for branch_dir in output_dir.iterdir():
             if not branch_dir.is_dir():
                 continue
-            for f in branch_dir.iterdir():
+            for f in list(branch_dir.iterdir()):
                 new_name = f.name.replace("Trachea_to_", "Inlet_to_")
                 if new_name != f.name:
                     f.rename(branch_dir / new_name)

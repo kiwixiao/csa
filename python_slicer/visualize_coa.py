@@ -51,7 +51,6 @@ def compute_coa_metrics(df):
 
     # Branches ordered by position along centerline (not outlet size)
     # Exclude dAo (continuation) — it has the most CSA planes
-    branch_arcs = _get_branch_arc_lengths(df)
 
     # Identify dAo: the branch with the most planes in the CSV
     branch_plane_counts = {}
@@ -541,6 +540,15 @@ def render_centerline_csa(df, stl_path, output_path, subject_id, metrics=None):
     centroids = main[["centroid_x", "centroid_y", "centroid_z"]].values.astype(float)
     csa_values = main["area_mm2"].values.astype(float)
     arc_vals = main["arc_length_mm"].values.astype(float)
+
+    # CubicSpline requires strictly increasing x; drop duplicate arc lengths.
+    # main is already sorted by arc_length_mm, so np.unique (returns sorted,
+    # first-occurrence indices) preserves the centroid/CSA correspondence.
+    arc_vals, _uniq = np.unique(arc_vals, return_index=True)
+    centroids = centroids[_uniq]
+    csa_values = csa_values[_uniq]
+    if len(arc_vals) < 2:
+        return
 
     from scipy.interpolate import CubicSpline
     n = 500

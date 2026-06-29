@@ -169,13 +169,15 @@ def slice_with_loop_filter(stl_path, centerline_path, output_dir, name,
         arc_lengths = compute_arc_length(positions_array)
 
         areas = np.array([s.area for s in valid_sections])
+        # Same heuristic as convert_units_if_needed: meters if max arc length < 1
+        in_meters = arc_lengths.size > 0 and np.max(arc_lengths) < 1.0
         arc_lengths, areas = convert_units_if_needed(arc_lengths, areas)
 
         for section, new_area in zip(valid_sections, areas):
-            try:
-                section.area = new_area
-            except AttributeError:
-                pass
+            section.area = new_area            # dataclass is mutable; assignment works
+            if in_meters:
+                section.perimeter = section.perimeter * 1000.0   # m -> mm
+                section.centroid = np.asarray(section.centroid) * 1000.0
     else:
         arc_lengths = np.array([])
 

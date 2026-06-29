@@ -150,16 +150,18 @@ class DiameterCalculator:
         cov = np.cov(centered_points.T)
 
         # Eigenvalue decomposition
-        eigenvalues, eigenvectors = np.linalg.eig(cov)
+        eigenvalues, eigenvectors = np.linalg.eigh(cov)  # symmetric: real eigenvalues, orthonormal eigenvectors
+        eigenvalues = np.clip(eigenvalues, 0.0, None)     # guard tiny negatives from round-off
 
         # Sort by eigenvalues (descending)
         idx = eigenvalues.argsort()[::-1]
         eigenvalues = eigenvalues[idx]
         eigenvectors = eigenvectors[:, idx]
 
-        # Major and minor axes (2 * std along principal components)
-        major_axis = 2 * np.sqrt(eigenvalues[0])
-        minor_axis = 2 * np.sqrt(eigenvalues[1])
+        # Major and minor axes: for boundary (rim) points the std along a
+        # principal axis is semi_axis/sqrt(2), so full axis = 2*sqrt(2)*std
+        major_axis = 2 * np.sqrt(2) * np.sqrt(eigenvalues[0])
+        minor_axis = 2 * np.sqrt(2) * np.sqrt(eigenvalues[1])
 
         # Rotation angle
         theta = np.arctan2(eigenvectors[1, 0], eigenvectors[0, 0])

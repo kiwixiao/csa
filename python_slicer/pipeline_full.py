@@ -452,10 +452,10 @@ def step5_combine_and_renumber_csvs(subject, partition, validated_indices, index
         # Add metadata columns
         df['phase'] = phase
         df['file_id'] = time_name
-        df['original_plane_index'] = df['plane_index']  # Save original index
-
-        # Apply sequential index mapping
-        df['plane_index'] = df['plane_index'].map(index_mapping)
+        # plane_index is already sequential (renumbered in Step 4); recover original via reverse map
+        reverse_mapping = {seq: orig for orig, seq in index_mapping.items()}
+        df['original_plane_index'] = df['plane_index'].map(reverse_mapping)
+        # (do NOT remap plane_index again — it is already sequential)
 
         all_data.append(df)
 
@@ -678,7 +678,7 @@ def run_full_pipeline(subject, partition, output_dir=".", force=False, workers=0
             print(f"✓ Loaded index mapping: {len(index_mapping)} entries")
         else:
             # Recreate mapping from validated indices
-            index_mapping = {orig_idx: new_idx for new_idx, orig_idx in enumerate(validated_indices, start=1)}
+            index_mapping = {orig_idx: new_idx for new_idx, orig_idx in enumerate(validated_indices)}
             print(f"✓ Recreated index mapping: {len(index_mapping)} entries")
 
         print("✓ Skipping Step 4 (already completed)")

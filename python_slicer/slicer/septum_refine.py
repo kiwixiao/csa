@@ -67,16 +67,28 @@ def build_matched_curves(
     left_nose = left_cl[diverge_idx:]
     right_nose = right_cl[diverge_idx:]
 
+    if len(left_nose) < 2 or len(right_nose) < 2:
+        raise ValueError(
+            f"Too few post-divergence centerline points "
+            f"(L={len(left_nose)}, R={len(right_nose)}); cannot build matched curves."
+        )
+
     s_left = _arc_length_param(left_nose)
     s_right = _arc_length_param(right_nose)
+
+    if s_left[-1] == 0 or s_right[-1] == 0:
+        raise ValueError("Degenerate (zero-length) post-divergence centerline.")
 
     t_left = s_left / s_left[-1]
     t_right = s_right / s_right[-1]
 
     t_common = np.linspace(0, 1, n_samples)
 
-    left_matched = interp1d(t_left, left_nose, axis=0, kind="cubic")(t_common)
-    right_matched = interp1d(t_right, right_nose, axis=0, kind="cubic")(t_common)
+    kind_left = "cubic" if len(left_nose) >= 4 else "linear"
+    kind_right = "cubic" if len(right_nose) >= 4 else "linear"
+
+    left_matched = interp1d(t_left, left_nose, axis=0, kind=kind_left)(t_common)
+    right_matched = interp1d(t_right, right_nose, axis=0, kind=kind_right)(t_common)
 
     midline_avg = (left_matched + right_matched) / 2.0
     return left_matched, right_matched, midline_avg, t_common
@@ -256,9 +268,6 @@ def split_at_septum(
 
     # Build adjacency for above-septum faces and find connected components
     log.info(f"  Finding connected components above septum ({len(above_indices)} faces)...")
-    above_mesh_adj = _build_face_adjacency(
-        trimesh.Trimesh(vertices=mesh.vertices, faces=mesh.faces[above_indices], process=False)
-    )
     # We need adjacency in the original mesh's face space for the above-septum subset
     sub_adj = _build_face_adjacency(mesh)
     sub_adj_above = sub_adj[above_indices][:, above_indices]

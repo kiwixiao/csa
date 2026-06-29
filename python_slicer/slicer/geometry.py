@@ -34,6 +34,10 @@ def compute_plane_normal(centerline_points: np.ndarray, index: int,
         # Fixed Z-axis normal (used for balloon experiments in MATLAB)
         return np.array([0.0, 0.0, 1.0])
 
+    if n_points < 2:
+        # Degenerate centerline: no tangent is defined, return a sensible default
+        return np.array([0.0, 0.0, 1.0])
+
     # Compute tangent vector based on position
     if index == 0:
         # First point: forward difference
@@ -46,7 +50,12 @@ def compute_plane_normal(centerline_points: np.ndarray, index: int,
         normal = centerline_points[index + 1] - centerline_points[index - 1]
 
     # Normalize
-    normal = normal / np.linalg.norm(normal)
+    norm = np.linalg.norm(normal)
+    if norm > 0:
+        normal = normal / norm
+    else:
+        # Degenerate tangent (coincident centerline points); fall back to Z-axis
+        normal = np.array([0.0, 0.0, 1.0])
 
     return normal
 

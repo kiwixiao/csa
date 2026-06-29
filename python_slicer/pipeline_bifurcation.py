@@ -271,7 +271,6 @@ def main():
     # ── Step 4: Mutual plane detection ──────────────────────
     logger.info(f"\n--- Step 4: Mutual plane detection ---")
 
-    n_frames = len(stl_files)
     mutual_indices = {}
 
     for region in ["DescendingAirway", "LeftNose", "RightNose"]:

@@ -271,7 +271,7 @@ def compute_enhanced_metrics(df, output_dir, subject_id):
     # Eccentricity from major/minor if available
     if "major_axis_mm" in df.columns and "minor_axis_mm" in df.columns:
         ratio = df["minor_axis_mm"] / df["major_axis_mm"].replace(0, np.nan)
-        df["eccentricity"] = np.sqrt(1 - ratio**2)
+        df["eccentricity"] = np.sqrt(np.clip(1 - ratio**2, 0, None))
     else:
         df["eccentricity"] = np.nan
 
@@ -619,11 +619,17 @@ def generate_4panel_video(combined_dir, motion_stl_dir, df, output_dir,
                 flow_profile_path = matches[0]
                 break
     if flow_profile_path and Path(flow_profile_path).exists():
-        flow_df = pd.read_csv(flow_profile_path)
-        flow_df.columns = ["time_s", "flow_kgs"]
-        flow_df["time_ms"] = flow_df["time_s"] * 1000
-        log.info(f"  Flow profile: {Path(flow_profile_path).name} "
-                 f"({len(flow_df)} pts, 0-{flow_df['time_ms'].max():.0f}ms)")
+        _fdf = pd.read_csv(flow_profile_path)
+        if _fdf.shape[1] >= 2:
+            flow_df = _fdf.iloc[:, :2].copy()
+            flow_df.columns = ["time_s", "flow_kgs"]
+            flow_df["time_ms"] = flow_df["time_s"] * 1000
+            log.info(f"  Flow profile: {Path(flow_profile_path).name} "
+                     f"({len(flow_df)} pts, 0-{flow_df['time_ms'].max():.0f}ms)")
+        else:
+            flow_df = None
+            log.warning(f"  Flow profile {Path(flow_profile_path).name} has "
+                        f"{_fdf.shape[1]} column(s); expected >=2, skipping flow overlay")
 
     # Determine camera positions from first frame
     airway_stls = sorted(motion_stl_dir.glob("*.stl"))
@@ -671,6 +677,7 @@ def generate_4panel_video(combined_dir, motion_stl_dir, df, output_dir,
         return paths
 
     import tempfile
+    import shutil
     tmp_region_dir = Path(tempfile.mkdtemp())
 
     log.info(f"  Rendering {len(plane_files)} 4-panel frames (PyVista)...")
@@ -802,6 +809,9 @@ def generate_4panel_video(combined_dir, motion_stl_dir, df, output_dir,
         if (fi + 1) % 5 == 0 or fi == len(plane_files) - 1:
             log.info(f"    Frame {fi+1}/{len(plane_files)}")
 
+    # Temp region STLs are no longer needed after all frames are rendered.
+    shutil.rmtree(tmp_region_dir, ignore_errors=True)
+
     # Encode to MP4
     video_path = output_dir / f"{subject_id}_4panel_breathing.mp4"
     frame_pattern = str(frames_4p_dir / "frame_%04d.png")
@@ -916,6 +926,7 @@ def generate_highlighted_video(combined_dir, motion_stl_dir, df, output_dir,
         return paths
 
     import tempfile
+    import shutil
     tmp_hl_dir = Path(tempfile.mkdtemp())
 
     log.info(f"  Rendering {len(plane_files)} highlighted frames...")
@@ -1098,6 +1109,9 @@ def generate_highlighted_video(combined_dir, motion_stl_dir, df, output_dir,
 
         if (fi + 1) % 5 == 0 or fi == len(plane_files) - 1:
             log.info(f"    Frame {fi+1}/{len(plane_files)}")
+
+    # Temp region STLs are no longer needed after all frames are rendered.
+    shutil.rmtree(tmp_hl_dir, ignore_errors=True)
 
     # Encode
     hl_tag = "_".join(f"{k}" for k in highlight_arcs.keys())
@@ -1320,66 +1334,6 @@ def _render_mesh_with_planes(full_mesh_path, centroids, plane_indices, output_pn
 
     plotter.screenshot(str(output_png))
     plotter.close()
-
-
-def _make_wob_page(efd_path, subject_id):
-    """Create a Work of Breathing bar chart figure from EFDiff CSV."""
-    efd = pd.read_csv(efd_path)
-
-    # Clean column names
-    rename = {}
-    for col in efd.columns:
-        if col.strip().lower() == "time":
-            rename[col] = "Time"
-        else:
-            name = col.split("_Monitor_pts")[0]
-            if name.startswith("efd_"):
-                name = name[4:]
-            rename[col] = name
-    efd = efd.rename(columns=rename)
-    regions = [c for c in efd.columns if c != "Time"]
-
-    # Time-averaged |EFDiff|
-    efd_mean = {}
-    for r in regions:
-        efd_mean[r] = np.abs(efd[r].values).mean()
-    efd_mean = pd.Series(efd_mean).sort_values(ascending=True)
-    efd_total = efd_mean.sum()
-
-    colors = ["#e41a1c", "#377eb8", "#4daf4a", "#984ea3",
-              "#ff7f00", "#a65628", "#f781bf", "#999999"]
-
-    fig, ax = plt.subplots(figsize=(12, 6))
-    fig.suptitle(
-        f"{subject_id} — Work of Breathing\n"
-        f"Total = {efd_total:.4f} W",
-        fontsize=14, fontweight="bold",
-    )
-
-    bar_colors = [colors[regions.index(r) % len(colors)]
-                  if r in regions else "gray"
-                  for r in efd_mean.index]
-    ax.barh(efd_mean.index, efd_mean.values, color=bar_colors, alpha=0.85)
-
-    for i, (val, name) in enumerate(zip(efd_mean.values, efd_mean.index)):
-        pct = val / efd_total * 100 if efd_total > 0 else 0
-        ax.text(val + efd_mean.max() * 0.02, i,
-                f"{val:.4f} W ({pct:.0f}%)", va="center", fontsize=10)
-
-    ax.set_xlabel("Mean |EFDiff| (W)", fontsize=12, fontweight="bold")
-    ax.set_title("Regional Energy Dissipation", fontsize=12)
-    ax.grid(True, alpha=0.3, axis="x")
-    ax.set_xlim(0, efd_mean.max() * 1.35)
-    ax.tick_params(axis="y", labelsize=11)
-
-    fig.text(
-        0.5, 0.005,
-        "Work of Breathing = time-averaged |EFDiff| per region. "
-        "Higher = more effort required to breathe through that region.",
-        ha="center", fontsize=8, color="gray", style="italic",
-    )
-    plt.tight_layout(rect=[0, 0.03, 1, 0.90])
-    return fig
 
 
 def generate_pdf_report(df, comp_df, output_dir, subject_id, efd_csv=None):

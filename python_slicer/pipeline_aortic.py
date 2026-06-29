@@ -89,6 +89,9 @@ def discover_branches_aortic(branches_dir, subject_id=""):
                 longest_len = len(cl)
                 longest_label = label
 
+    if longest_label is None:
+        raise RuntimeError(f"No full-path centerlines found under {branches_dir}")
+
     # Load main CL for ordering branches by divergence point
     main_info = branches[longest_label]
     main_cl = read_vtk_centerline(str(main_info["centerline"]))

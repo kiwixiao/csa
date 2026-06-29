@@ -26,7 +26,6 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from pathlib import Path
-from scipy.spatial import cKDTree
 
 sys.path.insert(0, str(Path(__file__).parent))
 from slicer.io_utils import (
@@ -128,46 +127,6 @@ def discover_branches(branches_dir: Path, subject_id: str = ""):
 # Region classification
 # ---------------------------------------------------------------------------
 
-def build_vertex_classifier(refine_result):
-    """Build a classifier that labels loops by vertex matching to refined meshes.
-
-    Uses KDTree on vertices (not face centers) — instant and exact since the
-    cross-section vertices come from the same mesh.
-    """
-    left_tree = cKDTree(refine_result["left_mesh"].triangles_center)
-    right_tree = cKDTree(refine_result["right_mesh"].triangles_center)
-    septum_pos = refine_result["septum_pos"]
-    septum_normal = refine_result["septum_normal"]
-
-    def classify_loop(loop):
-        """Classify a CrossSection loop by majority vote of its vertices.
-
-        For each vertex in the loop, find nearest face center on left_mesh
-        vs right_mesh. Majority vote across ALL vertices determines the region.
-        Robust for irregular/T-shaped cross-sections.
-        """
-        if np.dot(loop.centroid - septum_pos, septum_normal) < 0:
-            return "DescendingAirway"
-
-        # Above septum: check ALL vertices against L vs R face centers
-        verts = loop.vertices
-        if len(verts) == 0:
-            return "DescendingAirway"
-
-        d_left, _ = left_tree.query(verts)
-        d_right, _ = right_tree.query(verts)
-
-        n_left = (d_left < d_right).sum()
-        n_right = (d_right <= d_left).sum()
-
-        if n_left > n_right:
-            return "LeftNose"
-        else:
-            return "RightNose"
-
-    return classify_loop
-
-
 # ---------------------------------------------------------------------------
 # Slicing helpers
 # ---------------------------------------------------------------------------
@@ -236,7 +195,8 @@ def slice_along_midline(mesh, centerline, log, label_prefix=""):
             # Get 2D planar representation + transform for proper triangulation
             try:
                 planar, transform = section.to_planar()
-            except Exception:
+            except Exception as e:
+                log.debug(f"  {label_prefix}Plane {i+1}/{n}: to_planar failed: {e}")
                 continue
             polygons = planar.polygons_full
             paths = section.discrete
@@ -255,7 +215,8 @@ def slice_along_midline(mesh, centerline, log, label_prefix=""):
                 # Proper constrained triangulation (respects concavity)
                 try:
                     tri_verts_2d, tri_faces = triangulate_polygon(poly)
-                except Exception:
+                except Exception as e:
+                    log.debug(f"  {label_prefix}Plane {i+1}/{n}: triangulate_polygon failed: {e}")
                     continue
 
                 # Transform back to 3D
@@ -305,7 +266,7 @@ def generate_csa_plot(csv_path, output_path, name):
 
     fig, axes = plt.subplots(2, 1, figsize=(14, 9), sharex=True)
 
-    has_frames = "frame_name" in df_plot.columns
+    has_frames = ("frame_name" in df_plot.columns) and len(df_plot) > 0
     first_frame = df_plot["frame_name"].iloc[0] if has_frames else None
     labeled = set()
 
@@ -465,14 +426,11 @@ def run_single_frame(
         left_mesh = extract_submesh(full_mesh, full_face_labels == 1)
         right_mesh = extract_submesh(full_mesh, full_face_labels == 2)
         desc_mesh = extract_submesh(full_mesh, full_face_labels == 3)
-        no_mouth_mask = full_face_labels > 0  # everything except mouth
-        no_mouth_mesh = extract_submesh(full_mesh, no_mouth_mask)
     else:
         # Fallback: use refine_result meshes (frame 0 only)
         left_mesh = refine_result["left_mesh"]
         right_mesh = refine_result["right_mesh"]
         desc_mesh = refine_result["desc_mesh"]
-        no_mouth_mesh = trimesh.util.concatenate([left_mesh, right_mesh, desc_mesh])
 
     septum_pos = refine_result["septum_pos"]
     septum_normal = refine_result["septum_normal"]
@@ -496,10 +454,12 @@ def run_single_frame(
     from scipy.interpolate import interp1d as scipy_interp1d
     arc = compute_arc_length(desc_cl_raw)
     total_len = arc[-1] if len(arc) > 0 else 0
-    if total_len > 0:
+    if total_len > 0 and len(desc_cl_raw) >= 2:
         n_resampled = max(int(total_len / 2.0), 10)
         t_uniform = np.linspace(0, total_len, n_resampled)
-        desc_cl = scipy_interp1d(arc, desc_cl_raw, axis=0, kind='cubic')(t_uniform)
+        # Cubic spline needs >= 4 samples; fall back to linear otherwise
+        kind = 'cubic' if len(desc_cl_raw) >= 4 else 'linear'
+        desc_cl = scipy_interp1d(arc, desc_cl_raw, axis=0, kind=kind)(t_uniform)
     else:
         desc_cl = desc_cl_raw
 
@@ -757,14 +717,20 @@ Examples:
 
         # Resample to uniform ~2mm spacing
         arc = compute_arc_length(desc_cl_raw)
-        total_len = arc[-1]
+        total_len = arc[-1] if len(arc) > 0 else 0.0
         target_spacing = 2.0  # mm
-        n_resampled = max(int(total_len / target_spacing), 10)
-        from scipy.interpolate import interp1d
-        t_uniform = np.linspace(0, total_len, n_resampled)
-        desc_cl = interp1d(arc, desc_cl_raw, axis=0, kind='cubic')(t_uniform)
-        log.info(f"  Descending CL: {len(desc_cl)} pts "
-                 f"(truncated at septum, resampled to {target_spacing}mm spacing)")
+        if total_len > 0 and len(desc_cl_raw) >= 2:
+            n_resampled = max(int(total_len / target_spacing), 10)
+            from scipy.interpolate import interp1d
+            t_uniform = np.linspace(0, total_len, n_resampled)
+            # Cubic spline needs >= 4 samples; fall back to linear otherwise
+            kind = 'cubic' if len(desc_cl_raw) >= 4 else 'linear'
+            desc_cl = interp1d(arc, desc_cl_raw, axis=0, kind=kind)(t_uniform)
+            log.info(f"  Descending CL: {len(desc_cl)} pts "
+                     f"(truncated at septum, resampled to {target_spacing}mm spacing)")
+        else:
+            desc_cl = desc_cl_raw
+            log.info("  Descending CL: empty after septum truncation (septum_cl_idx==0); skipping resample")
     else:
         desc_cl = merged_cl
 
@@ -963,6 +929,15 @@ Examples:
     arc_vals = df["arc_length_mm"].values
     area_vals = df["area_mm2"].values
     arc_conv, area_conv = convert_units_if_needed(arc_vals, area_vals)
+    # convert_units_if_needed only scales arc_length and area, and only when the
+    # input is in meters (max arc < 1.0). All other length-dependent columns were
+    # computed from mesh geometry in the same (meter) units, so rescale them too.
+    if np.max(arc_vals) < 1.0:
+        df["arc_length_branch_mm"] *= 1000.0
+        df["perimeter_mm"] *= 1000.0
+        df["hydraulic_diameter_mm"] *= 1000.0
+        df["equivalent_diameter_mm"] *= 1000.0
+        df[["centroid_x", "centroid_y", "centroid_z"]] *= 1000.0
     df["arc_length_mm"] = arc_conv
     df["area_mm2"] = area_conv
 

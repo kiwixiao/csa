@@ -3,11 +3,12 @@ Validation and quality control utilities
 New features + replaces validation logic from trachSlice_OSA_AB_3.m
 """
 
+import logging
 import numpy as np
 import trimesh
 from scipy.spatial import ConvexHull
 from typing import Tuple, Optional
-from .geometry import distance_point_to_plane, check_adjacent_planes_intersect as geom_check_intersect
+from .geometry import check_adjacent_planes_intersect as geom_check_intersect
 
 
 def check_plane_enclosed_by_mesh(plane_centroid: np.ndarray,
@@ -44,8 +45,9 @@ def check_plane_enclosed_by_mesh(plane_centroid: np.ndarray,
             # where A are the hull equations and b are the offsets
             distances = hull.equations[:, :3] @ plane_centroid + hull.equations[:, 3]
 
-            # Point is inside if all distances are <= tolerance
-            is_inside_hull = np.all(distances <= tolerance)
+            # Point is inside if all distances are <= -tolerance
+            # (requires the centroid to be at least `tolerance` mm inside the hull)
+            is_inside_hull = np.all(distances <= -tolerance)
 
             return is_inside_hull
 
@@ -58,8 +60,10 @@ def check_plane_enclosed_by_mesh(plane_centroid: np.ndarray,
             is_in_bbox = np.all(plane_centroid >= bbox_min) and np.all(plane_centroid <= bbox_max)
             return is_in_bbox
 
-    except Exception as e:
-        print(f"Warning: Enclosure check failed: {str(e)}, assuming valid")
+    except (ValueError, IndexError, AttributeError) as e:
+        # Geometry/shape errors from mesh.contains or hull math: be permissive
+        # so a transient check failure does not discard an otherwise-valid plane.
+        logging.warning("Enclosure check failed (%s), assuming valid", e)
         return True  # Conservative: assume valid if check fails
 
 
