@@ -32,3 +32,18 @@ def test_assign_labels_from_seeds_requires_one_source():
     seeds = [{"label": "leftnose", "centroid": [0, 0, 0.0], "normal": [0, 0, 1]}]
     with pytest.raises(ValueError):
         assign_labels_from_seeds(profiles, seeds)
+
+
+def test_assign_labels_from_seeds_count_mismatch():
+    import pytest
+    profiles = [
+        {"id": 0, "barycenter": np.array([0.0, 0.0, 0.0])},
+        {"id": 1, "barycenter": np.array([-5.0, 0.0, 40.0])},
+    ]
+    seeds = [
+        {"label": "outlet",    "centroid": [0.0, 0.0, 0.0],  "normal": [0, 0, 1]},
+        {"label": "leftnose",  "centroid": [-5.0, 0.0, 41.0], "normal": [0, 0, 1]},
+        {"label": "rightnose", "centroid": [5.0, 0.0, 41.0],  "normal": [0, 0, 1]},
+    ]
+    with pytest.raises(ValueError):
+        assign_labels_from_seeds(profiles, seeds)

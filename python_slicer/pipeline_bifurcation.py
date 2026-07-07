@@ -123,7 +123,9 @@ def select_regions(branches):
         "inlets": inlets,
         "has_left": "LeftNose" in inlets,
         "has_right": "RightNose" in inlets,
-        "has_mouth": ("Mouth" in branches and branches["Mouth"].get("mesh") is not None),
+        "has_mouth": ("Mouth" in branches
+                      and branches["Mouth"].get("mesh") is not None
+                      and branches["Mouth"].get("centerline") is not None),
     }
 
 
@@ -200,7 +202,18 @@ def main():
                        "skipped for missing sides (see mouth-only handling).")
 
         # ── Single-branch path (mouth-only or single nostril): no septum ──
-        inlet = "Mouth" if has_mouth else regions["inlets"][0]
+        inlets = regions["inlets"]
+        if len(inlets) != 1:
+            logger.error(
+                f"Single-branch path supports exactly one inlet, got {inlets}. "
+                f"Asymmetric configs (e.g. a single nostril plus mouth) are not "
+                f"supported — need either both nostrils (septum path) or mouth-only.")
+            sys.exit(1)
+        inlet = inlets[0]
+        if inlet != "Mouth":
+            logger.warning(
+                f"Single-branch slicing of a lone nostril ({inlet}) uses keep-only-"
+                f"containing, which may undercount turbinate loops.")
         logger.info(f"\n--- Single-branch pipeline: {inlet} -> DescendingAirway ---")
         inlet_cl = read_vtk_centerline(str(branches[inlet]["centerline"]))
 

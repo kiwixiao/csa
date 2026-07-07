@@ -206,6 +206,13 @@ def assign_labels_from_seeds(profiles, seeds):
     seed_pts = np.asarray([s["centroid"] for s in seeds], dtype=float)
     seed_lbl = [s["label"] for s in seeds]
 
+    if len(profiles) != len(seeds):
+        raise ValueError(
+            f"Seed/open-profile count mismatch: {len(profiles)} open profiles "
+            f"but {len(seeds)} seeds ({[s['label'] for s in seeds]}). The capped "
+            f"solid likely has an unexpected extra opening (e.g. an unsealed nasal "
+            f"cavity). Refusing to guess labels.")
+
     labels, source_ids, target_ids = {}, [], []
     for p in profiles:
         d = np.linalg.norm(seed_pts - np.asarray(p["barycenter"], dtype=float), axis=1)

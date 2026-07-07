@@ -1,6 +1,5 @@
 """csa-uncap: convert a named multi-solid STL into open-profile + seeds."""
 import argparse
-from pathlib import Path
 from slicer.anatomical_input import adapt_named_stl
 
 

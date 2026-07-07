@@ -22,3 +22,9 @@ def test_select_regions_requires_inlet_and_outlet():
         select_regions(_b("DescendingAirway"))         # no inlet
     with pytest.raises(ValueError):
         select_regions(_b("LeftNose", "RightNose"))    # no outlet/descending
+
+def test_select_regions_mouth_without_centerline():
+    d = _b("LeftNose", "Mouth", "DescendingAirway")
+    d["Mouth"]["centerline"] = None
+    r = select_regions(d)
+    assert not r["has_mouth"]
