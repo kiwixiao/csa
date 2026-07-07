@@ -1,6 +1,9 @@
+import json
+from pathlib import Path
+
 import numpy as np
 import trimesh
-from slicer.anatomical_input import read_named_solids, normalize_cap_name, CAP_LABELS, classify_solids, Cap
+from slicer.anatomical_input import read_named_solids, normalize_cap_name, CAP_LABELS, classify_solids, Cap, is_named_multisolid_stl, adapt_named_stl
 
 MULTISOLID = """solid wall
 facet normal 0 0 0
@@ -106,3 +109,46 @@ def test_classify_solids_maxface_fallback_and_area_weighting():
     assert cap.centroid[0] > 9.0
 
     assert abs(np.linalg.norm(cap.normal) - 1) < 1e-6
+
+
+def _write_airway(tmp_path, names_z):
+    """Write an ASCII multi-solid STL with a wall and named caps."""
+    stl = ["solid wall"]
+    for i in range(6):
+        stl += ["facet normal 0 0 0", " outer loop",
+                f"  vertex {i} 0 0", f"  vertex {i+1} 0 0", f"  vertex {i} 1 0",
+                " endloop", "endfacet"]
+    stl.append("endsolid wall")
+    for name, z in names_z:
+        stl += [f"solid {name}", "facet normal 0 0 1", " outer loop",
+                f"  vertex 0 0 {z}", f"  vertex 1 0 {z}", f"  vertex 0 1 {z}",
+                " endloop", "endfacet", f"endsolid {name}"]
+    p = tmp_path / "airway.stl"
+    p.write_text("\n".join(stl) + "\n")
+    return p
+
+
+def test_is_named_multisolid_true_and_binary_false(tmp_path):
+    p = _write_airway(tmp_path, [("outlet", 0.0), ("mouth", 9.0)])
+    assert is_named_multisolid_stl(str(p)) is True
+    b = tmp_path / "bin.stl"
+    b.write_bytes(b"solid binaryheader" + bytes(200))  # binary-ish, no endsolid lines
+    assert is_named_multisolid_stl(str(b)) is False
+
+
+def test_adapt_named_stl_writes_openprofile_and_seeds(tmp_path):
+    p = _write_airway(tmp_path, [("outlet", 0.0), ("leftnose", 9.0), ("rightnose", 9.0)])
+    out = tmp_path / "surface" / "_derived"
+    op, seeds_path, unknown = adapt_named_stl(str(p), str(out))
+    assert Path(op).exists() and Path(seeds_path).exists()
+    data = json.loads(Path(seeds_path).read_text())
+    labels = sorted(s["label"] for s in data["seeds"])
+    assert labels == ["leftnose", "outlet", "rightnose"]
+    assert unknown == []
+
+
+def test_adapt_named_stl_requires_outlet_and_inlet(tmp_path):
+    import pytest
+    p = _write_airway(tmp_path, [("leftnose", 9.0), ("rightnose", 9.0)])  # no outlet
+    with pytest.raises(ValueError):
+        adapt_named_stl(str(p), str(tmp_path / "d"))

@@ -109,3 +109,41 @@ def classify_solids(solids: "dict[str, trimesh.Trimesh]") -> tuple[trimesh.Trime
                         centroid=_area_weighted_centroid(m),
                         normal=_area_weighted_normal(m)))
     return wall, caps, unknown
+
+
+def is_named_multisolid_stl(path: str) -> bool:
+    """True iff the STL is ASCII with more than one `endsolid` line."""
+    try:
+        text = Path(path).read_text(errors="replace")
+    except (OSError, UnicodeError):
+        return False
+    n = sum(1 for ln in text.splitlines() if ln.strip().lower().startswith("endsolid"))
+    return n > 1
+
+
+def adapt_named_stl(named_stl: str, out_dir: str) -> tuple[Path, Path, list[str]]:
+    """named multi-solid STL -> (openprofile.stl, anatomical_seeds.json, unknown)."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    wall, caps, unknown = classify_solids(read_named_solids(named_stl))
+    if wall is None or len(wall.faces) == 0:
+        raise ValueError(f"No 'wall' solid (lumen surface) found in {named_stl}")
+    labels = {c.label for c in caps}
+    if "outlet" not in labels:
+        raise ValueError("No 'outlet' cap found — cannot set centerline source.")
+    if not (labels - {"outlet"}):
+        raise ValueError("No inlet caps (leftnose/rightnose/mouth) found.")
+    if unknown:
+        log.warning("Unrecognized cap solids skipped: %s", unknown)
+
+    open_profile = out_dir / "openprofile.stl"
+    wall.export(str(open_profile))
+
+    seeds = [{"label": c.label, "centroid": c.centroid.tolist(),
+              "normal": c.normal.tolist()} for c in caps]
+    seeds_path = out_dir / "anatomical_seeds.json"
+    seeds_path.write_text(json.dumps({"seeds": seeds, "unknown_solids": unknown}, indent=2))
+    log.info("Adapter: wrote %s (%d caps: %s)",
+             open_profile.name, len(caps), sorted(labels))
+    return open_profile, seeds_path, unknown
