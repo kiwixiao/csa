@@ -63,3 +63,49 @@ def normalize_cap_name(name: str) -> str:
     """Lowercase, strip non-alphanumerics, resolve common synonyms."""
     key = "".join(ch for ch in name.strip().lower() if ch.isalnum())
     return _ALIASES.get(key, key)
+
+
+@dataclass
+class Cap:
+    label: str          # normalized: leftnose/rightnose/mouth/outlet
+    raw_name: str       # original solid name
+    centroid: np.ndarray  # (3,) area-weighted face-center
+    normal: np.ndarray    # (3,) unit, area-weighted
+
+
+def _area_weighted_centroid(mesh):
+    """Compute area-weighted centroid of mesh faces."""
+    w = mesh.area_faces
+    if w.sum() <= 0:
+        return mesh.vertices.mean(axis=0)
+    return np.average(mesh.triangles_center, axis=0, weights=w)
+
+
+def _area_weighted_normal(mesh):
+    """Compute unit area-weighted normal of mesh."""
+    w = mesh.area_faces
+    n = np.average(mesh.face_normals, axis=0, weights=w) if w.sum() > 0 \
+        else mesh.face_normals.mean(axis=0)
+    norm = np.linalg.norm(n)
+    return n / norm if norm > 0 else np.array([0.0, 0.0, 1.0])
+
+
+def classify_solids(solids: dict) -> tuple[trimesh.Trimesh, list[Cap], list[str]]:
+    """Split named solids into (wall_mesh, [Cap], [unknown_solid_names])."""
+    wall_key = next((k for k in solids if normalize_cap_name(k) == "wall"), None)
+    if wall_key is None:
+        wall_key = max(solids, key=lambda k: len(solids[k].faces))
+    wall = solids[wall_key]
+
+    caps, unknown = [], []
+    for k, m in solids.items():
+        if k == wall_key:
+            continue
+        label = normalize_cap_name(k)
+        if label not in CAP_LABELS:
+            unknown.append(k)
+            continue
+        caps.append(Cap(label=label, raw_name=k,
+                        centroid=_area_weighted_centroid(m),
+                        normal=_area_weighted_normal(m)))
+    return wall, caps, unknown
