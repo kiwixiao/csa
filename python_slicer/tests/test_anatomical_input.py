@@ -111,14 +111,16 @@ def test_classify_solids_maxface_fallback_and_area_weighting():
     assert abs(np.linalg.norm(cap.normal) - 1) < 1e-6
 
 
-def _write_airway(tmp_path, names_z):
+def _write_airway(tmp_path, names_z, include_wall=True):
     """Write an ASCII multi-solid STL with a wall and named caps."""
-    stl = ["solid wall"]
-    for i in range(6):
-        stl += ["facet normal 0 0 0", " outer loop",
-                f"  vertex {i} 0 0", f"  vertex {i+1} 0 0", f"  vertex {i} 1 0",
-                " endloop", "endfacet"]
-    stl.append("endsolid wall")
+    stl = []
+    if include_wall:
+        stl.append("solid wall")
+        for i in range(6):
+            stl += ["facet normal 0 0 0", " outer loop",
+                    f"  vertex {i} 0 0", f"  vertex {i+1} 0 0", f"  vertex {i} 1 0",
+                    " endloop", "endfacet"]
+        stl.append("endsolid wall")
     for name, z in names_z:
         stl += [f"solid {name}", "facet normal 0 0 1", " outer loop",
                 f"  vertex 0 0 {z}", f"  vertex 1 0 {z}", f"  vertex 0 1 {z}",
@@ -150,5 +152,17 @@ def test_adapt_named_stl_writes_openprofile_and_seeds(tmp_path):
 def test_adapt_named_stl_requires_outlet_and_inlet(tmp_path):
     import pytest
     p = _write_airway(tmp_path, [("leftnose", 9.0), ("rightnose", 9.0)])  # no outlet
+    with pytest.raises(ValueError):
+        adapt_named_stl(str(p), str(tmp_path / "d"))
+
+
+def test_adapt_named_stl_requires_wall(tmp_path):
+    import pytest
+    # Cap solids present (including outlet + an inlet), but no solid named
+    # "wall" at all. classify_solids would silently fall back to the
+    # largest-face cap as the "wall" — adapt_named_stl must reject this
+    # instead of exporting a cap mesh as the lumen.
+    p = _write_airway(tmp_path, [("outlet", 0.0), ("leftnose", 9.0)],
+                       include_wall=False)
     with pytest.raises(ValueError):
         adapt_named_stl(str(p), str(tmp_path / "d"))

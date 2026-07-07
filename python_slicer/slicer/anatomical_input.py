@@ -126,7 +126,10 @@ def adapt_named_stl(named_stl: str, out_dir: str) -> tuple[Path, Path, list[str]
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    wall, caps, unknown = classify_solids(read_named_solids(named_stl))
+    solids = read_named_solids(named_stl)
+    if not any(normalize_cap_name(k) == "wall" for k in solids):
+        raise ValueError(f"No 'wall' solid (lumen surface) found in {named_stl}")
+    wall, caps, unknown = classify_solids(solids)
     if wall is None or len(wall.faces) == 0:
         raise ValueError(f"No 'wall' solid (lumen surface) found in {named_stl}")
     labels = {c.label for c in caps}
