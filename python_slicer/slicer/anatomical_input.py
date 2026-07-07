@@ -16,7 +16,7 @@ import trimesh
 log = logging.getLogger(__name__)
 
 
-def read_named_solids(path):
+def read_named_solids(path: str) -> "dict[str, trimesh.Trimesh]":
     """Parse an ASCII multi-solid STL into {solid_name: trimesh.Trimesh}."""
     text = Path(path).read_text(errors="replace")
     solids = {}
