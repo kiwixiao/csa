@@ -17,10 +17,13 @@ from pathlib import Path
 from dataclasses import dataclass
 from typing import List, Dict, Tuple
 
-import vtk
-from vtk.util.numpy_support import vtk_to_numpy
-
-from vmtk import vmtkscripts
+try:
+    import vtk
+    from vtk.util.numpy_support import vtk_to_numpy
+    from vmtk import vmtkscripts
+    _HAVE_VMTK = True
+except ImportError:  # allows importing pure helpers (e.g. assign_labels_from_seeds) without vmtk
+    _HAVE_VMTK = False
 
 
 # ---------------------------------------------------------------------------
@@ -182,6 +185,38 @@ def classify_open_profiles(profiles: List[Dict]
     source_ids = [trachea["id"]]
     target_ids = [p["id"] for p in profiles if p["id"] != trachea["id"]]
 
+    return source_ids, target_ids, labels
+
+
+CAP_TO_PIPELINE_LABEL = {
+    "outlet": "Trachea",       # relabeled DescendingAirway downstream
+    "leftnose": "LeftNose",
+    "rightnose": "RightNose",
+    "mouth": "Mouth",
+}
+
+
+def assign_labels_from_seeds(profiles, seeds):
+    """Label detected open profiles from anatomical seed centroids.
+
+    profiles: [{"id", "barycenter": (3,) array}], seeds: [{"label","centroid",...}].
+    Each profile takes the label of its nearest seed. Returns
+    (source_ids, target_ids, labels) — same shape as classify_open_profiles.
+    """
+    seed_pts = np.asarray([s["centroid"] for s in seeds], dtype=float)
+    seed_lbl = [s["label"] for s in seeds]
+
+    labels, source_ids, target_ids = {}, [], []
+    for p in profiles:
+        d = np.linalg.norm(seed_pts - np.asarray(p["barycenter"], dtype=float), axis=1)
+        cap = seed_lbl[int(np.argmin(d))]
+        labels[p["id"]] = CAP_TO_PIPELINE_LABEL.get(cap, cap)
+        (source_ids if cap == "outlet" else target_ids).append(p["id"])
+
+    if len(source_ids) != 1:
+        raise ValueError(
+            f"Expected exactly one 'outlet' profile, got {len(source_ids)} "
+            f"(labels={list(labels.values())})")
     return source_ids, target_ids, labels
 
 
@@ -573,9 +608,10 @@ def extract_surface_by_group_ids(clipped_surface: vtk.vtkPolyData,
 
 class AirwayBranchDetector:
 
-    def __init__(self, stl_path: str, resampling_step: float = 2.0):
+    def __init__(self, stl_path: str, resampling_step: float = 2.0, seeds=None):
         self.stl_path = Path(stl_path)
         self.resampling_step = resampling_step
+        self.seeds = seeds            # None -> geometric guessing; list -> seeded
         if not self.stl_path.exists():
             raise FileNotFoundError(f"STL not found: {self.stl_path}")
 
@@ -604,7 +640,11 @@ class AirwayBranchDetector:
 
         # Step 2: Detect and classify open profiles
         profiles = detect_open_profiles(surface)
-        source_ids, target_ids, profile_labels = classify_open_profiles(profiles)
+        if self.seeds is not None:
+            source_ids, target_ids, profile_labels = assign_labels_from_seeds(
+                profiles, self.seeds)
+        else:
+            source_ids, target_ids, profile_labels = classify_open_profiles(profiles)
 
         # Build target label list (order matches VMTK centerline cell order)
         target_labels = []
@@ -668,33 +708,36 @@ class AirwayBranchDetector:
                 pts[0], pts[-1] = start_pt, end_pt
             full_paths[label] = pts
 
-        # Reorder branches by arc-length position along the longest (MainAorta) centerline
-        # Find the longest centerline (= MainAorta = Trunk + dAo)
-        longest_label = max(full_paths, key=lambda k: len(full_paths[k]))
-        longest_pts = full_paths[longest_label]
-        from scipy.spatial import cKDTree as _cKDTree
-        main_tree = _cKDTree(longest_pts)
+        if self.seeds is None:
+            # Reorder branches by arc-length position along the longest (MainAorta) centerline
+            # Find the longest centerline (= MainAorta = Trunk + dAo)
+            longest_label = max(full_paths, key=lambda k: len(full_paths[k]))
+            longest_pts = full_paths[longest_label]
+            from scipy.spatial import cKDTree as _cKDTree
+            main_tree = _cKDTree(longest_pts)
 
-        # Map each branch's endpoint to arc length on MainAorta
-        branch_order = []
-        main_diffs = np.linalg.norm(np.diff(longest_pts, axis=0), axis=1)
-        main_arc = np.concatenate([[0], np.cumsum(main_diffs)])
-        for label, pts in full_paths.items():
-            _, idx = main_tree.query(pts[-1])  # endpoint
-            branch_order.append((label, float(main_arc[idx])))
-        branch_order.sort(key=lambda x: x[1])
+            # Map each branch's endpoint to arc length on MainAorta
+            branch_order = []
+            main_diffs = np.linalg.norm(np.diff(longest_pts, axis=0), axis=1)
+            main_arc = np.concatenate([[0], np.cumsum(main_diffs)])
+            for label, pts in full_paths.items():
+                _, idx = main_tree.query(pts[-1])  # endpoint
+                branch_order.append((label, float(main_arc[idx])))
+            branch_order.sort(key=lambda x: x[1])
 
-        # Create rename map: VMTK name → ordered name (Branch_1, Branch_2, ...)
-        rename_map = {}
-        for i, (old_label, arc) in enumerate(branch_order):
-            new_label = f"Branch_{i+1}"
-            rename_map[old_label] = new_label
-            print(f"  {new_label} (was {old_label}): arc={arc:.1f}mm")
+            # Create rename map: VMTK name → ordered name (Branch_1, Branch_2, ...)
+            rename_map = {}
+            for i, (old_label, arc) in enumerate(branch_order):
+                new_label = f"Branch_{i+1}"
+                rename_map[old_label] = new_label
+                print(f"  {new_label} (was {old_label}): arc={arc:.1f}mm")
 
-        # Apply renaming to full_paths, target_labels, surface_partitions
-        full_paths = {rename_map.get(k, k): v for k, v in full_paths.items()}
-        surface_partitions = {rename_map.get(k, k): v for k, v in surface_partitions.items()}
-        target_labels = [rename_map.get(t, t) for t in target_labels]
+            # Apply renaming to full_paths, target_labels, surface_partitions
+            full_paths = {rename_map.get(k, k): v for k, v in full_paths.items()}
+            surface_partitions = {rename_map.get(k, k): v for k, v in surface_partitions.items()}
+            target_labels = [rename_map.get(t, t) for t in target_labels]
+        # When seeds are given, anatomical labels (LeftNose/RightNose/Mouth/
+        # DescendingAirway) pass straight through — no Branch_N renaming.
 
         # Save combined centerlines
         all_parts = [centerline_to_vtp(pts) for pts in full_paths.values()]
@@ -753,7 +796,7 @@ class AirwayBranchDetector:
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
-    import argparse
+    import argparse, json
 
     parser = argparse.ArgumentParser(
         description="Detect airway branches from a full airway STL using VMTK")
@@ -761,7 +804,13 @@ if __name__ == "__main__":
     parser.add_argument("--output-dir", default="./branch_output")
     parser.add_argument("--subject-id", default="")
     parser.add_argument("--resampling-step", type=float, default=2.0)
+    parser.add_argument("--seeds", default="",
+                        help="anatomical_seeds.json (enables seeded, anatomy-aware mode)")
     args = parser.parse_args()
 
-    detector = AirwayBranchDetector(args.stl_path, args.resampling_step)
+    seeds = None
+    if args.seeds:
+        seeds = json.loads(Path(args.seeds).read_text())["seeds"]
+
+    detector = AirwayBranchDetector(args.stl_path, args.resampling_step, seeds=seeds)
     detector.run(args.output_dir, args.subject_id)

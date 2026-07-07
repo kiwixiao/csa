@@ -67,6 +67,8 @@ To create the vmtk environment:
                         help="Centerline resampling step length (default: 2.0)")
     parser.add_argument("--verbose", action="store_true",
                         help="Enable verbose output")
+    parser.add_argument("--seeds", default="",
+                        help="Path to anatomical_seeds.json for seeded mode")
     args = parser.parse_args()
 
     # Validate input
@@ -96,6 +98,8 @@ To create the vmtk environment:
         cmd.extend(["--subject-id", args.subject_id])
     if args.resampling_step != 2.0:
         cmd.extend(["--resampling-step", str(args.resampling_step)])
+    if args.seeds:
+        cmd.extend(["--seeds", str(Path(args.seeds).resolve())])
 
     print(f"\nRunning branch detection...")
     print(f"  Input: {stl_path}")
