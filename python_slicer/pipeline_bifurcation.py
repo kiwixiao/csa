@@ -82,12 +82,49 @@ def _process_frame(args_tuple):
 def find_surface_stl(subject_dir):
     """Find the single STL file in surface/ folder (any name)."""
     surface_dir = Path(subject_dir) / "surface"
-    stl_files = list(surface_dir.glob("*.stl"))
+    stl_files = [p for p in surface_dir.glob("*.stl") if p.parent.name != "_derived"]
     if not stl_files:
         raise FileNotFoundError(f"No STL found in {surface_dir}")
     if len(stl_files) > 1:
         log.warning(f"  Multiple STLs in surface/, using first: {stl_files[0].name}")
     return stl_files[0]
+
+
+from slicer.anatomical_input import is_named_multisolid_stl, adapt_named_stl
+
+
+def resolve_surface_and_seeds(subject_dir):
+    """Return (open_profile_stl, seeds_json | None).
+
+    If the surface STL is a named multi-solid file, run the adapter to derive an
+    open-profile mesh + anatomical seeds under surface/_derived/. Otherwise pass
+    the STL through unchanged (legacy geometric detection, no seeds).
+    """
+    surface_stl = find_surface_stl(subject_dir)
+    if is_named_multisolid_stl(str(surface_stl)):
+        derived = Path(subject_dir) / "surface" / "_derived"
+        open_profile, seeds_json, unknown = adapt_named_stl(str(surface_stl), str(derived))
+        if unknown:
+            log.warning(f"  Adapter skipped unrecognized cap solids: {unknown}")
+        log.info(f"  Named multi-solid STL detected -> {open_profile.name} + seeds")
+        return open_profile, seeds_json
+    return surface_stl, None
+
+
+def select_regions(branches):
+    """Validate + report which anatomical regions are present."""
+    if "DescendingAirway" not in branches:
+        raise ValueError("No DescendingAirway (outlet) branch found.")
+    inlets = [r for r in ("LeftNose", "RightNose", "Mouth")
+              if r in branches and branches[r].get("centerline")]
+    if not inlets:
+        raise ValueError("No inlet branch (LeftNose/RightNose/Mouth) found.")
+    return {
+        "inlets": inlets,
+        "has_left": "LeftNose" in inlets,
+        "has_right": "RightNose" in inlets,
+        "has_mouth": ("Mouth" in branches and branches["Mouth"].get("mesh") is not None),
+    }
 
 
 def main():
@@ -124,6 +161,7 @@ def main():
     # ── Step 0: Branch detection (frame 0) ───────────────────
     logger.info(f"\n--- Step 0: Branch detection ---")
     branches_dir = subject_dir / "branches"
+    surface_stl, seeds_json = resolve_surface_and_seeds(subject_dir)
 
     if not branches_dir.exists():
         logger.info("  Running branch detection on frame 0 (vmtk env)...")
@@ -132,10 +170,12 @@ def main():
         cmd = [
             "conda", "run", "-n", "vmtk",
             "python", str(script_dir / "step0_branch_detect.py"),
-            str(find_surface_stl(subject_dir)),
+            str(surface_stl),
             "--output-dir", str(branches_dir),
             "--subject-id", subject_id,
         ]
+        if seeds_json is not None:
+            cmd += ["--seeds", str(seeds_json)]
         result = subprocess.run(cmd, capture_output=False)
         if result.returncode != 0:
             logger.error("Branch detection failed!")
@@ -144,13 +184,16 @@ def main():
         logger.info(f"  Branches already exist: {branches_dir}")
 
     branches = discover_branches(branches_dir, subject_id)
-    has_left = "LeftNose" in branches and branches["LeftNose"]["centerline"]
-    has_right = "RightNose" in branches and branches["RightNose"]["centerline"]
-    has_mouth = "Mouth" in branches and branches["Mouth"].get("mesh")
-
-    if not has_left or not has_right:
-        logger.error("Need both LeftNose and RightNose. Cannot proceed.")
+    try:
+        regions = select_regions(branches)
+    except ValueError as e:
+        logger.error(str(e))
         sys.exit(1)
+    has_left, has_right, has_mouth = regions["has_left"], regions["has_right"], regions["has_mouth"]
+    logger.info(f"  Regions present: {regions['inlets']} (+ DescendingAirway)")
+    if not (has_left and has_right):
+        logger.warning("  Fewer than two nostrils present; septum split will be "
+                       "skipped for missing sides (see mouth-only handling).")
 
     # ── Step 1: Septum refinement (frame 0) ────────────────
     logger.info(f"\n--- Step 1: Septum refinement ---")
@@ -166,6 +209,12 @@ def main():
     refine_result = refine_nasal_partition(
         left_cl_f0, right_cl_f0, full_mesh, mouth_mesh=mouth_mesh,
     )
+
+    if has_mouth:
+        refine_result["mouth_cl"] = read_vtk_centerline(str(branches["Mouth"]["centerline"]))
+        refine_result["mouth_mesh_path"] = str(branches["Mouth"]["mesh"])
+    else:
+        refine_result["mouth_cl"] = None
 
     # Save refined outputs + midline CL to branches/ for interpolation
     refine_result["left_mesh"].export(str(output_dir / f"{subject_id}_LeftNose_refined.stl"))
