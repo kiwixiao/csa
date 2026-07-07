@@ -121,7 +121,25 @@ named multi-solid STL
   not a bifurcation), so slice its sub-mesh with its own centerline using the existing
   `slice_along_centerline()` primitive (containment-filtered), producing the same per-region CSV /
   STL / plot outputs as LeftNose/RightNose/DescendingAirway.
-- Mouth-only configs (no nose) must run end-to-end with no septum step.
+- Mouth-only configs (no nose) must run end-to-end with no septum step (see 5.5).
+
+### 5.5 Mouth-only / single-passage slicing (residual nasal geometry)
+
+A capped-closed nostril means **no cap face**, but the **partial nasal cavity mesh is still present**
+in the `wall` solid. So a mouth-only airway is a **single branch** (mouth → outlet), yet a slice
+plane along the mouth centerline can still cut through the disconnected residual nasal geometry and
+produce **spurious extra loops**.
+
+- Handling: slice the whole `wall` along the single inlet→outlet centerline and **keep only the
+  closed loop that contains the centerline point**, discarding all others. This is the user's stated
+  requirement ("filter the mouth-only cut loop that contains the mouth centerline, ignore others").
+- The current `_extract_polygons_containing_centerline()` keeps ALL loops once one contains the
+  centerline (intended for nasal turbinates). Mouth-only therefore needs a new opt-in
+  `keep_only_containing=True` mode that returns only the centerline-containing loop. The default
+  (keep-all) is unchanged for the nasal/descending paths.
+- Config routing: when **both** nostrils are present → existing septum/bifurcation path (+ optional
+  Mouth branch). When **fewer than two nostrils** (mouth-only, or a single nostril) → skip septum
+  refinement and slice the single branch with `keep_only_containing=True`.
 
 ## 6. Preserved behavior (explicitly unchanged)
 

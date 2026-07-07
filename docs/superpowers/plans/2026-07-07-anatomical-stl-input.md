@@ -932,7 +932,238 @@ git commit -m "Implement Mouth region CSA (single-passage slicing)"
 
 ---
 
-### Task 8: `csa-uncap` standalone command + docs
+### Task 8: `keep_only_containing` slicing mode
+
+**Files:**
+- Modify: `python_slicer/slicer/mesh_intersection.py` (`_extract_polygons_containing_centerline` + `slice_mesh_with_plane` signature)
+- Modify: `python_slicer/slice_bifurcation.py` (`slice_along_centerline` gains the flag)
+- Test: `python_slicer/tests/test_keep_only_containing.py`
+
+**Interfaces:**
+- Consumes: existing `MeshPlaneSlicer`, `slice_along_centerline`.
+- Produces: `slice_along_centerline(mesh, centerline, branch_surface, log, label_prefix="", keep_only_containing=False)` and `MeshPlaneSlicer.slice_mesh_with_plane(..., keep_only_containing=False)`. When `True`, each plane returns only the loop containing the centerline point (rejects residual/disjoint geometry); when `False`, unchanged (keeps all loops — nasal default).
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/test_keep_only_containing.py
+import logging
+import numpy as np
+import trimesh
+from slice_bifurcation import slice_along_centerline
+
+def _two_tubes():
+    a = trimesh.creation.cylinder(radius=3.0, height=40.0, sections=48)   # axis z, at origin
+    b = trimesh.creation.cylinder(radius=3.0, height=40.0, sections=48)
+    b.apply_translation([30.0, 0.0, 0.0])                                 # residual "nose" tube
+    return trimesh.util.concatenate([a, b])
+
+def test_keep_only_containing_rejects_disjoint_loop():
+    mesh = _two_tubes()
+    centerline = np.array([[0.0, 0.0, z] for z in np.linspace(-15, 15, 11)])  # through tube A
+    log = logging.getLogger("t"); log.addHandler(logging.NullHandler())
+
+    kept_all = slice_along_centerline(mesh, centerline, None, log, keep_only_containing=False)
+    kept_one = slice_along_centerline(mesh, centerline, None, log, keep_only_containing=True)
+
+    assert max(len(loops) for _, _, loops in kept_all) >= 2     # both tubes cut
+    assert kept_one and all(len(loops) == 1 for _, _, loops in kept_one)  # only tube A kept
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd python_slicer && pytest tests/test_keep_only_containing.py -v`
+Expected: FAIL with `TypeError: slice_along_centerline() got an unexpected keyword argument 'keep_only_containing'`
+
+- [ ] **Step 3a: Add the flag to the extractor**
+
+In `slicer/mesh_intersection.py`, add `keep_only_containing=False` to the `_extract_polygons_containing_centerline` signature (currently line ~169-171), and replace the multi-loop tail (currently lines ~234-263) with:
+
+```python
+        centerline_2d = Point(0.0, 0.0)
+        centerline_loop_found = False
+        containing_polygon = None
+        for poly_idx, entity_idx in enumerate(polygon_metadata):
+            entity = slice_result_3d.entities[entity_idx]
+            vertices_3d = slice_result_3d.vertices[entity.points]
+            vertices_2d_custom = self._project_to_plane_2d(vertices_3d, plane_origin, plane_normal)
+            polygon_custom = Polygon(vertices_2d_custom)
+            if polygon_custom.is_valid and polygon_custom.contains(centerline_2d):
+                centerline_loop_found = True
+                containing_polygon = all_polygons[poly_idx]
+                break
+
+        if not centerline_loop_found:
+            return []                       # reject plane: no loop holds the centerline
+
+        if keep_only_containing:
+            # Single-passage (mouth-only): drop residual disconnected loops (closed
+            # nasal cavity), keep only the lumen the centerline passes through.
+            return [containing_polygon]
+
+        # Keep ALL loops — nasal turbinates / multi-passage default (unchanged).
+        return all_polygons
+```
+
+- [ ] **Step 3b: Thread the flag through `slice_mesh_with_plane`**
+
+In `slicer/mesh_intersection.py`, add `keep_only_containing=False` to `slice_mesh_with_plane`'s signature (line ~45), and at its call to `self._extract_polygons_containing_centerline(...)`, pass `keep_only_containing=keep_only_containing`.
+
+- [ ] **Step 3c: Thread the flag through `slice_along_centerline`**
+
+In `slice_bifurcation.py`, update the signature (line ~134) and the slicer call (line ~148):
+
+```python
+def slice_along_centerline(mesh, centerline, branch_surface, log,
+                           label_prefix="", keep_only_containing=False):
+    ...
+        loops = slicer.slice_mesh_with_plane(
+            plane_origin=centerline[i],
+            plane_normal=normals[i],
+            plane_number=i,
+            keep_only_containing=keep_only_containing,
+        )
+```
+
+(Leave the rest of the function unchanged.)
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd python_slicer && pytest tests/test_keep_only_containing.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add python_slicer/slicer/mesh_intersection.py python_slicer/slice_bifurcation.py python_slicer/tests/test_keep_only_containing.py
+git commit -m "Add keep_only_containing slicing mode for single-passage airways"
+```
+
+---
+
+### Task 9: Mouth-only / single-nostril single-branch path
+
+**Files:**
+- Modify: `python_slicer/slice_bifurcation.py` (add `run_single_branch_frame`)
+- Modify: `python_slicer/pipeline_bifurcation.py` (route `<2` nostrils to the single-branch path, skipping septum)
+- Test: `python_slicer/tests/test_single_branch_frame.py`
+
+**Interfaces:**
+- Consumes: `slice_along_centerline(..., keep_only_containing=True)` (Task 8), `build_region_row` (Task 7), `read_stl`, `compute_arc_length`, `merge_loops`, `write_cross_section_stl` (existing imports).
+- Produces: `run_single_branch_frame(stl_path, output_dir, name, centerline, region, log=None) -> list[dict]` — slices the whole wall along one centerline, keeps only the centerline loop, returns CSA rows tagged `region`.
+
+- [ ] **Step 1: Write the failing test**
+
+```python
+# tests/test_single_branch_frame.py
+import logging
+import numpy as np
+import trimesh
+from slice_bifurcation import run_single_branch_frame
+
+def test_single_branch_frame_mouth_only(tmp_path):
+    a = trimesh.creation.cylinder(radius=3.0, height=40.0, sections=48)
+    b = trimesh.creation.cylinder(radius=3.0, height=40.0, sections=48)
+    b.apply_translation([30.0, 0.0, 0.0])                     # residual nose tube
+    mesh = trimesh.util.concatenate([a, b])
+    stl = tmp_path / "wall.stl"; mesh.export(str(stl))
+    cl = np.array([[0.0, 0.0, z] for z in np.linspace(-15, 15, 11)])
+
+    rows = run_single_branch_frame(str(stl), str(tmp_path / "out"), "F0", cl, "Mouth",
+                                   logging.getLogger("t"))
+    assert rows and all(r["region"] == "Mouth" for r in rows)
+    # residual tube B is excluded, so area ~ pi*3^2 (~28), never doubled
+    assert all(r["area_mm2"] < 40.0 for r in rows)
+```
+
+- [ ] **Step 2: Run test to verify it fails**
+
+Run: `cd python_slicer && pytest tests/test_single_branch_frame.py -v`
+Expected: FAIL with `ImportError: cannot import name 'run_single_branch_frame'`
+
+- [ ] **Step 3a: Implement `run_single_branch_frame`**
+
+Add to `slice_bifurcation.py` (after `run_single_frame`):
+
+```python
+def run_single_branch_frame(stl_path, output_dir, name, centerline, region, log=None):
+    """Slice a single-passage airway (mouth-only / single-nostril) along one
+    centerline, keeping only the loop containing the centerline point so residual
+    disconnected geometry (closed nasal cavity) is ignored."""
+    if log is None:
+        log = logging.getLogger(__name__)
+    output_dir = Path(output_dir)
+    planes_dir = output_dir / f"{region}_Planes"
+    planes_dir.mkdir(parents=True, exist_ok=True)
+
+    mesh = read_stl(str(stl_path))
+    results = slice_along_centerline(mesh, centerline, mesh, log,
+                                     label_prefix=f"{region} ", keep_only_containing=True)
+    positions = np.array([pos for _, pos, _ in results])
+    arc = compute_arc_length(positions) if len(positions) else np.array([])
+
+    rows, count = [], 0
+    for k, (plane_idx, pos, loops) in enumerate(results):
+        merged = merge_loops(loops)
+        if merged is None:
+            continue
+        arc_len = float(arc[k]) if k < len(arc) else 0.0
+        write_cross_section_stl(str(planes_dir / f"{name}-{region}-{count:03d}.stl"),
+                                merged.vertices, merged.faces)
+        count += 1
+        rows.append(build_region_row(plane_idx, region, arc_len, arc_len,
+                                     merged.area, merged.perimeter, merged.centroid,
+                                     region.lower()))
+    log.info(f"  Frame {name}: {region}={count}")
+    return rows
+```
+
+- [ ] **Step 3b: Route the pipeline for `<2` nostrils**
+
+In `pipeline_bifurcation.py`, after `select_regions` sets `has_left/has_right/has_mouth`, branch the whole "Step 1 + Step 3" flow. Wrap the existing septum refinement (Step 1) and multi-frame slice (Step 3) in `if has_left and has_right:`. Add the single-branch else-path immediately after Step 0's region log:
+
+```python
+    if not (has_left and has_right):
+        # ── Single-branch path (mouth-only or single nostril): no septum ──
+        inlet = "Mouth" if has_mouth else regions["inlets"][0]
+        logger.info(f"\n--- Single-branch pipeline: {inlet} -> DescendingAirway ---")
+        inlet_cl = read_vtk_centerline(str(branches[inlet]["centerline"]))
+
+        # Slice frame-0 surface (extend to motion frames later if needed)
+        frame0_stl = surface_stl
+        rows = run_single_branch_frame(str(frame0_stl), str(output_dir / "frames" / "frame0"),
+                                       "frame0", inlet_cl, inlet, logger)
+        for r in rows:
+            r["frame_name"] = "frame0"; r["frame_index"] = 0
+        df = pd.DataFrame(rows)
+        if len(df) == 0:
+            logger.error("No data produced (single-branch)!"); sys.exit(1)
+        csv_all = output_dir / f"{subject_id}-Data.csv"
+        df.to_csv(csv_all, index=False)
+        generate_csa_plot(csv_all, output_dir / f"{subject_id}-CSA_plot.png", subject_id)
+        logger.info(f"\nDONE (single-branch). Output: {output_dir}")
+        return
+```
+
+Import `run_single_branch_frame` in the `from slice_bifurcation import (...)` block at the top of `pipeline_bifurcation.py`.
+
+(The both-nostril flow — Step 1 septum refinement through Step 7 — stays exactly as-is under the `if has_left and has_right:` guard.)
+
+- [ ] **Step 4: Run test to verify it passes**
+
+Run: `cd python_slicer && pytest tests/test_single_branch_frame.py -v`
+Expected: PASS
+
+- [ ] **Step 5: Commit**
+
+```bash
+git add python_slicer/slice_bifurcation.py python_slicer/pipeline_bifurcation.py python_slicer/tests/test_single_branch_frame.py
+git commit -m "Add mouth-only / single-nostril single-branch slicing path"
+```
+
+---
+
+### Task 10: `csa-uncap` standalone command + docs
 
 **Files:**
 - Create: `python_slicer/uncap_cli.py`
@@ -1031,7 +1262,7 @@ git commit -m "Add csa-uncap command and document named-STL input format"
 
 ---
 
-### Task 9: Full regression + end-to-end verification
+### Task 11: Full regression + end-to-end verification
 
 **Files:**
 - Test: run existing suite; manual end-to-end note.
@@ -1062,5 +1293,15 @@ git add -A && git commit -m "Fixes from end-to-end verification of anatomical-ST
 
 ## Notes / scope boundaries
 
-- **Mouth-only (no nostrils) and single-nostril configs:** the adapter, seeded detection, and `select_regions` all accept these, and `branch_detector` will produce a `Mouth`+`DescendingAirway` (or single-nostril) branch set. However, `refine_nasal_partition` (the septum split) assumes **both** nostrils. For a mouth-only airway there is no septum and no L/R split — the Mouth branch slices fine, but the descending-airway slicing currently derives its centerline from the nasal midline. Making the descending region fall back to the outlet→mouth centerline when <2 nostrils are present is a **follow-up** (a small branch in `run_single_frame` Step "Slice descending"), flagged here so it is not mistaken for covered. This plan fully delivers the both-nostril (+ optional mouth) case end-to-end.
-- `branch_detector.py` legacy geometric path (open mesh, no seeds) keeps its current `Branch_N` behavior — unchanged and out of scope; the seeded path is the supported route for the new input.
+- **Mouth-only / single-nostril configs are covered by Tasks 8-9.** When fewer than two nostrils
+  are present the pipeline skips septum refinement and slices the single branch
+  (inlet→outlet) with `keep_only_containing=True`. This is safe **because the mouth lumen is always
+  a single loop**, so keeping only the centerline-containing loop correctly discards residual
+  (closed) nasal-cavity loops. `keep_only_containing` is applied ONLY on this single-branch path —
+  the nasal/bifurcation path keeps the default keep-all behavior, since a nostril plane legitimately
+  produces multiple loops (turbinates, L/R passages) that must all count.
+- **Multi-frame on the single-branch path:** Task 9 slices frame 0 only. Extending it to deformed
+  motion frames mirrors the both-nostril worker (`_process_frame`) and is a small follow-up, needed
+  only if breathing-cycle CSA is required for mouth-only subjects.
+- `branch_detector.py` legacy geometric path (open mesh, no seeds) keeps its current `Branch_N`
+  behavior — unchanged and out of scope; the seeded path is the supported route for the new input.
