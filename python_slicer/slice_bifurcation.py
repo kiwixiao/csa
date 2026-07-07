@@ -620,6 +620,38 @@ def run_single_frame(
     return all_rows
 
 
+def run_single_branch_frame(stl_path, output_dir, name, centerline, region, log=None):
+    """Slice a single-passage airway (mouth-only / single-nostril) along one
+    centerline, keeping only the loop containing the centerline point so residual
+    disconnected geometry (closed nasal cavity) is ignored."""
+    if log is None:
+        log = logging.getLogger(__name__)
+    output_dir = Path(output_dir)
+    planes_dir = output_dir / f"{region}_Planes"
+    planes_dir.mkdir(parents=True, exist_ok=True)
+
+    mesh = read_stl(str(stl_path))
+    results = slice_along_centerline(mesh, centerline, mesh, log,
+                                     label_prefix=f"{region} ", keep_only_containing=True)
+    positions = np.array([pos for _, pos, _ in results])
+    arc = compute_arc_length(positions) if len(positions) else np.array([])
+
+    rows, count = [], 0
+    for k, (plane_idx, pos, loops) in enumerate(results):
+        merged = merge_loops(loops)
+        if merged is None:
+            continue
+        arc_len = float(arc[k]) if k < len(arc) else 0.0
+        write_cross_section_stl(str(planes_dir / f"{name}-{region}-{count:03d}.stl"),
+                                merged.vertices, merged.faces)
+        count += 1
+        rows.append(build_region_row(plane_idx, region, arc_len, arc_len,
+                                     merged.area, merged.perimeter, merged.centroid,
+                                     region.lower()))
+    log.info(f"  Frame {name}: {region}={count}")
+    return rows
+
+
 def _save_loops_stl(loop_data, stl_path):
     """Save loop data as properly triangulated STL."""
     all_verts, all_faces = [], []

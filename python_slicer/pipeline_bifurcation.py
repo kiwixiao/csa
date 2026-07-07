@@ -29,7 +29,7 @@ sys.path.insert(0, str(Path(__file__).parent))
 from slicer.io_utils import read_stl, read_vtk_centerline
 from slicer.septum_refine import refine_nasal_partition
 from slice_bifurcation import (
-    run_single_frame, discover_branches, setup_logging,
+    run_single_frame, run_single_branch_frame, discover_branches, setup_logging,
     generate_csa_plot, generate_summary, save_centerline_vtk,
 )
 from interpolate_frames import generate_motion_frames
@@ -198,6 +198,26 @@ def main():
     if not (has_left and has_right):
         logger.warning("  Fewer than two nostrils present; septum split will be "
                        "skipped for missing sides (see mouth-only handling).")
+
+        # ── Single-branch path (mouth-only or single nostril): no septum ──
+        inlet = "Mouth" if has_mouth else regions["inlets"][0]
+        logger.info(f"\n--- Single-branch pipeline: {inlet} -> DescendingAirway ---")
+        inlet_cl = read_vtk_centerline(str(branches[inlet]["centerline"]))
+
+        # Slice frame-0 surface (extend to motion frames later if needed)
+        frame0_stl = surface_stl
+        rows = run_single_branch_frame(str(frame0_stl), str(output_dir / "frames" / "frame0"),
+                                       "frame0", inlet_cl, inlet, logger)
+        for r in rows:
+            r["frame_name"] = "frame0"; r["frame_index"] = 0
+        df = pd.DataFrame(rows)
+        if len(df) == 0:
+            logger.error("No data produced (single-branch)!"); sys.exit(1)
+        csv_all = output_dir / f"{subject_id}-Data.csv"
+        df.to_csv(csv_all, index=False)
+        generate_csa_plot(csv_all, output_dir / f"{subject_id}-CSA_plot.png", subject_id)
+        logger.info(f"\nDONE (single-branch). Output: {output_dir}")
+        return
 
     # ── Step 1: Septum refinement (frame 0) ────────────────
     logger.info(f"\n--- Step 1: Septum refinement ---")
