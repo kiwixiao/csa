@@ -39,3 +39,27 @@ def read_named_solids(path: str) -> "dict[str, trimesh.Trimesh]":
             name = None
             verts = []
     return solids
+
+
+CAP_LABELS = {"leftnose", "rightnose", "mouth", "outlet"}
+
+_ALIASES = {
+    "trachea": "outlet",
+    "out": "outlet",
+    "outlet1": "outlet",
+    "descending": "outlet",
+    "leftnostril": "leftnose",
+    "lnose": "leftnose",
+    "left": "leftnose",
+    "nl": "leftnose",
+    "rightnostril": "rightnose",
+    "rnose": "rightnose",
+    "right": "rightnose",
+    "nr": "rightnose",
+}
+
+
+def normalize_cap_name(name: str) -> str:
+    """Lowercase, strip non-alphanumerics, resolve common synonyms."""
+    key = "".join(ch for ch in name.strip().lower() if ch.isalnum())
+    return _ALIASES.get(key, key)

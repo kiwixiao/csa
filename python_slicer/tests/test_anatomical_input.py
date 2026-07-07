@@ -1,6 +1,6 @@
 import numpy as np
 import trimesh
-from slicer.anatomical_input import read_named_solids
+from slicer.anatomical_input import read_named_solids, normalize_cap_name, CAP_LABELS
 
 MULTISOLID = """solid wall
 facet normal 0 0 0
@@ -30,3 +30,13 @@ def test_read_named_solids_splits_blocks(tmp_path):
     assert isinstance(solids["wall"], trimesh.Trimesh)
     assert len(solids["wall"].faces) == 1
     assert np.allclose(solids["outlet"].vertices[:, 2].mean(), 5.0)
+
+
+def test_normalize_cap_name_case_and_aliases():
+    assert normalize_cap_name("LeftNose") == "leftnose"
+    assert normalize_cap_name("  RIGHT_NOSE ") == "rightnose"
+    assert normalize_cap_name("outlet_1") == "outlet"
+    assert normalize_cap_name("Trachea") == "outlet"
+    assert normalize_cap_name("Mouth") == "mouth"
+    assert normalize_cap_name("wall") == "wall"
+    assert {"leftnose", "rightnose", "mouth", "outlet"} == CAP_LABELS
