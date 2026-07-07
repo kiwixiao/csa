@@ -65,3 +65,44 @@ def test_classify_solids_identifies_wall_and_caps(tmp_path):
     outlet = next(c for c in caps if c.label == "outlet")
     assert outlet.centroid.shape == (3,)
     assert abs(np.linalg.norm(outlet.normal) - 1.0) < 1e-6
+
+
+def test_classify_solids_maxface_fallback_and_area_weighting():
+    # No solid named "wall" -> classify_solids must fall back to the solid
+    # with the most faces. A box has 12 faces, easily beating a 2-face cap.
+    lumen = trimesh.creation.box(extents=[10, 10, 10])
+
+    # "outlet" cap built from two triangles of very different area, both in
+    # the z=0 plane, so area-weighting of the centroid is actually exercised
+    # (a single-facet cap would make the area-weighted average tautological).
+    #   triangle 1: (0,0,0),(1,0,0),(0,1,0)   -> area 0.5, center x = 1/3
+    #   triangle 2: (11,0,0),(15,0,0),(11,4,0) -> area 8.0 (16x larger), center x = 37/3
+    # simple (unweighted) average of the two centers: x = (1/3 + 37/3) / 2 = 19/3 ~= 6.333
+    # area-weighted average (weights 0.5 vs 8):      x = (0.5*(1/3) + 8*(37/3)) / 8.5 ~= 11.627
+    vertices = np.array([
+        [0.0, 0.0, 0.0],
+        [1.0, 0.0, 0.0],
+        [0.0, 1.0, 0.0],
+        [11.0, 0.0, 0.0],
+        [15.0, 0.0, 0.0],
+        [11.0, 4.0, 0.0],
+    ])
+    faces = [[0, 1, 2], [3, 4, 5]]
+    outlet = trimesh.Trimesh(vertices=vertices, faces=faces, process=False)
+
+    solids = {"lumen": lumen, "outlet": outlet}
+    wall, caps, unknown = classify_solids(solids)
+
+    assert wall is lumen  # max-faces fallback chosen since nothing is named "wall"
+    assert unknown == []
+
+    cap = next(c for c in caps if c.label == "outlet")
+    assert cap.label == "outlet"
+
+    simple_avg_x = 19 / 3  # ~= 6.333
+    area_weighted_x = (0.5 * (1 / 3) + 8 * (37 / 3)) / 8.5  # ~= 11.627
+    assert simple_avg_x < area_weighted_x
+    # threshold strictly between the simple average and the area-weighted value
+    assert cap.centroid[0] > 9.0
+
+    assert abs(np.linalg.norm(cap.normal) - 1) < 1e-6

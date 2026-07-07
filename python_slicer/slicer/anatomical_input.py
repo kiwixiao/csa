@@ -73,7 +73,7 @@ class Cap:
     normal: np.ndarray    # (3,) unit, area-weighted
 
 
-def _area_weighted_centroid(mesh):
+def _area_weighted_centroid(mesh: trimesh.Trimesh) -> np.ndarray:
     """Compute area-weighted centroid of mesh faces."""
     w = mesh.area_faces
     if w.sum() <= 0:
@@ -81,7 +81,7 @@ def _area_weighted_centroid(mesh):
     return np.average(mesh.triangles_center, axis=0, weights=w)
 
 
-def _area_weighted_normal(mesh):
+def _area_weighted_normal(mesh: trimesh.Trimesh) -> np.ndarray:
     """Compute unit area-weighted normal of mesh."""
     w = mesh.area_faces
     n = np.average(mesh.face_normals, axis=0, weights=w) if w.sum() > 0 \
@@ -90,7 +90,7 @@ def _area_weighted_normal(mesh):
     return n / norm if norm > 0 else np.array([0.0, 0.0, 1.0])
 
 
-def classify_solids(solids: dict) -> tuple[trimesh.Trimesh, list[Cap], list[str]]:
+def classify_solids(solids: "dict[str, trimesh.Trimesh]") -> tuple[trimesh.Trimesh, list[Cap], list[str]]:
     """Split named solids into (wall_mesh, [Cap], [unknown_solid_names])."""
     wall_key = next((k for k in solids if normalize_cap_name(k) == "wall"), None)
     if wall_key is None:
