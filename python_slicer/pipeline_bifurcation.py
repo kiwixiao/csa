@@ -329,7 +329,7 @@ def main():
 
     mutual_indices = {}
 
-    for region in ["DescendingAirway", "LeftNose", "RightNose"]:
+    for region in ["DescendingAirway", "LeftNose", "RightNose", "Mouth"]:
         region_frames = frame_plane_indices[region]
         if not region_frames:
             mutual_indices[region] = set()

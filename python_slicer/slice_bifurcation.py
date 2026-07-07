@@ -250,6 +250,21 @@ def slice_along_midline(mesh, centerline, log, label_prefix=""):
     return results
 
 
+def build_region_row(plane_idx, region, arc_len, branch_arc, area, perimeter,
+                     centroid, centerline_source):
+    """Assemble one CSA output row (shared by all regions)."""
+    hyd = DiameterCalculator.compute_hydraulic_diameter(area, perimeter)
+    equiv = DiameterCalculator.compute_equivalent_diameter(area)
+    return {
+        "plane_index": plane_idx, "region": region,
+        "arc_length_mm": arc_len, "arc_length_branch_mm": branch_arc,
+        "area_mm2": area, "perimeter_mm": perimeter,
+        "hydraulic_diameter_mm": hyd, "equivalent_diameter_mm": equiv,
+        "centroid_x": centroid[0], "centroid_y": centroid[1], "centroid_z": centroid[2],
+        "centerline_source": centerline_source, "is_valid": True,
+    }
+
+
 def generate_csa_plot(csv_path, output_path, name):
     """CSA plot colored by region."""
     df = pd.read_csv(csv_path)
@@ -464,7 +479,7 @@ def run_single_frame(
         desc_cl = desc_cl_raw
 
     # Create output dirs
-    for d in ["DescendingAirway_Planes", "LeftNose_Planes", "RightNose_Planes"]:
+    for d in ["DescendingAirway_Planes", "LeftNose_Planes", "RightNose_Planes", "Mouth_Planes"]:
         (output_dir / d).mkdir(parents=True, exist_ok=True)
 
     all_rows = []
@@ -570,7 +585,30 @@ def run_single_frame(
             "centerline_source": "right_nose", "is_valid": True,
         })
 
-    log.info(f"  Frame {name}: Desc={desc_count}, Left={left_count}, Right={right_count}")
+    # ── Slice mouth (single passage, containment-filtered) ──
+    mouth_count = 0
+    mouth_cl = refine_result.get("mouth_cl")
+    if mouth_cl is not None and full_face_labels is not None:
+        mouth_mesh = extract_submesh(full_mesh, full_face_labels == 0)
+        if len(mouth_mesh.faces) > 0:
+            mouth_results = slice_along_centerline(
+                mouth_mesh, mouth_cl, mouth_mesh, log, label_prefix="Mouth ")
+            mouth_positions = np.array([pos for _, pos, _ in mouth_results])
+            mouth_arc = compute_arc_length(mouth_positions) if len(mouth_positions) else np.array([])
+            for k, (plane_idx, pos, loops) in enumerate(mouth_results):
+                merged = merge_loops(loops)
+                if merged is None:
+                    continue
+                arc_len = float(mouth_arc[k]) if k < len(mouth_arc) else 0.0
+                stl_out = output_dir / "Mouth_Planes" / f"{name}-Mouth-{mouth_count:03d}.stl"
+                write_cross_section_stl(str(stl_out), merged.vertices, merged.faces)
+                mouth_count += 1
+                all_rows.append(build_region_row(
+                    plane_idx, "Mouth", arc_len, arc_len,
+                    merged.area, merged.perimeter, merged.centroid, "mouth"))
+
+    log.info(f"  Frame {name}: Desc={desc_count}, Left={left_count}, "
+             f"Right={right_count}, Mouth={mouth_count}")
     return all_rows
 
 
