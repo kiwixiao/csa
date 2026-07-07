@@ -166,3 +166,14 @@ def test_adapt_named_stl_requires_wall(tmp_path):
                        include_wall=False)
     with pytest.raises(ValueError):
         adapt_named_stl(str(p), str(tmp_path / "d"))
+
+
+def test_uncap_cli_smoke(tmp_path, monkeypatch, capsys):
+    import uncap_cli
+    p = _write_airway(tmp_path, [("outlet", 0.0), ("mouth", 9.0)])  # helper from Task 4 tests
+    out = tmp_path / "out"
+    monkeypatch.setattr("sys.argv", ["csa-uncap", str(p), "--out", str(out)])
+    uncap_cli.main()
+    captured = capsys.readouterr().out
+    assert "openprofile.stl" in captured
+    assert (out / "anatomical_seeds.json").exists()

@@ -45,6 +45,10 @@ csa-aortic /path/to/subject/ --subject-id COA001 --skip-branch-detect   # reuse 
 
 # Core slicer only
 csa-slice OSAMRI037 LeftNoseDecending --workers 8
+
+# Convert a named multi-solid STL (solid leftnose/rightnose/mouth/outlet/wall)
+# into an open-profile mesh + anatomical seeds (standalone / debugging).
+csa-uncap /path/to/named_airway.stl --out /path/to/subject/surface/_derived
 ```
 
 ## Running Tests
@@ -67,6 +71,18 @@ Tests must run from `python_slicer/` directory (imports use `slicer.*` paths). T
 | `csa-aortic` | `pipeline_aortic.py` | `subject/surface/` + auto-detected `branches/` | Aortic arch with CoA metrics |
 
 All three converge on the same core measurement logic in `slicer/`. They differ in input handling (FFD time series vs branch-detected regions) and post-processing.
+
+### Input Formats
+
+A named multi-solid STL (ASCII, `solid leftnose/rightnose/mouth/outlet/wall … endsolid`
+per region, as OpenFOAM `constant/triSurface` writes) dropped into `subject/surface/`
+is auto-detected by `csa-bifurcation`. The adapter (`slicer/anatomical_input.py`)
+splits it into an open-profile lumen mesh + `anatomical_seeds.json`, which seeds
+branch detection directly instead of relying on geometric endpoint search. Names
+are matched case-insensitively (with common aliases) and the adapter works with
+whichever of leftnose/rightnose/mouth/outlet are present, as long as `wall` and
+`outlet` both exist. Use `csa-uncap` standalone to run this conversion for
+debugging/inspection without invoking the full pipeline.
 
 ### Core Library (`python_slicer/slicer/`)
 

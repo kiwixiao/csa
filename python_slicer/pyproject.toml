@@ -28,6 +28,7 @@ csa-legacy = "pipeline_full:main"
 csa-bifurcation = "pipeline_bifurcation:main"
 csa-aortic = "pipeline_aortic:main"
 csa-slice = "main:main"
+csa-uncap = "uncap_cli:main"
 
 [tool.setuptools]
 py-modules = [
@@ -55,6 +56,7 @@ py-modules = [
     "analyze_airway_dynamics",
     "visualize_branches",
     "visualize_coa",
+    "uncap_cli",
 ]
 
 [tool.setuptools.packages.find]
