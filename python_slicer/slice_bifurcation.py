@@ -588,7 +588,7 @@ def run_single_frame(
     # ── Slice mouth (single passage, containment-filtered) ──
     mouth_count = 0
     mouth_cl = refine_result.get("mouth_cl")
-    if mouth_cl is not None and full_face_labels is not None:
+    if mouth_cl is not None and full_face_labels is not None and len(full_face_labels) == len(full_mesh.faces):
         mouth_mesh = extract_submesh(full_mesh, full_face_labels == 0)
         if len(mouth_mesh.faces) > 0:
             mouth_results = slice_along_centerline(
