@@ -132,11 +132,18 @@ def discover_branches(branches_dir: Path, subject_id: str = ""):
 # ---------------------------------------------------------------------------
 
 def slice_along_centerline(mesh, centerline, branch_surface, log,
-                           label_prefix=""):
+                           label_prefix="", keep_only_containing=False):
     """Slice mesh along centerline WITH containment filtering.
 
     Uses MeshPlaneSlicer which keeps only loops containing the centerline
     point. Good for simple tube geometries (descending airway).
+
+    Args:
+        keep_only_containing: If True, each plane keeps only the loop
+            containing the centerline point (single-passage mode). If False
+            (default), all loops are kept once one contains the centerline
+            (nasal/multi-passage default, unchanged).
+
     Returns list of (plane_idx, position, loops_kept) tuples.
     """
     normals = compute_all_plane_normals(centerline, smooth=True)
@@ -149,6 +156,7 @@ def slice_along_centerline(mesh, centerline, branch_surface, log,
             plane_origin=centerline[i],
             plane_normal=normals[i],
             plane_number=i,
+            keep_only_containing=keep_only_containing,
         )
         if not loops:
             continue

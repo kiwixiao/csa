@@ -45,7 +45,8 @@ class MeshPlaneSlicer:
     def slice_mesh_with_plane(self,
                              plane_origin: np.ndarray,
                              plane_normal: np.ndarray,
-                             plane_number: int = 0) -> List[CrossSection]:
+                             plane_number: int = 0,
+                             keep_only_containing: bool = False) -> List[CrossSection]:
         """
         Slice mesh with a plane and return all cross-sections
 
@@ -55,6 +56,10 @@ class MeshPlaneSlicer:
             plane_origin: Point on the cutting plane
             plane_normal: Normal vector of cutting plane (unit vector)
             plane_number: Index for debugging
+            keep_only_containing: If True, when multiple loops are found only
+                the loop containing the centerline point is kept (single-passage
+                mode). If False (default), all loops are kept (nasal/multi-passage
+                default, unchanged).
 
         Returns:
             List of CrossSection objects (can be empty if no intersection)
@@ -90,7 +95,8 @@ class MeshPlaneSlicer:
         # Extract polygons from paths
         # This replaces DetectConnectedElements/DetectTwoNodeConnectedElements
         # Pass slice_result to access 3D vertices for centerline containment check
-        polygons = self._extract_polygons_from_paths(paths_2d, slice_result, plane_origin, plane_normal)
+        polygons = self._extract_polygons_from_paths(paths_2d, slice_result, plane_origin, plane_normal,
+                                                     keep_only_containing=keep_only_containing)
 
         if not polygons:
             print(f"Warning: Plane {plane_number} - no closed polygons found")
@@ -168,7 +174,8 @@ class MeshPlaneSlicer:
 
     def _extract_polygons_from_paths(self, paths_2d, slice_result_3d,
                                      plane_origin: np.ndarray,
-                                     plane_normal: np.ndarray) -> List[Polygon]:
+                                     plane_normal: np.ndarray,
+                                     keep_only_containing: bool = False) -> List[Polygon]:
         """
         Extract closed polygons from 2D paths, filtering to keep only the loop
         that contains the centerline (plane origin).
@@ -180,6 +187,10 @@ class MeshPlaneSlicer:
             slice_result_3d: 3D slice result from mesh.section() (has .vertices and .entities)
             plane_origin: 3D centerline point (plane origin)
             plane_normal: 3D plane normal vector
+            keep_only_containing: If True, when multiple loops are found only
+                the loop containing the centerline is returned (single-passage
+                mode). If False (default), all loops are returned once at least
+                one contains the centerline (nasal/multi-passage default).
 
         Returns:
             List of Shapely Polygon objects (filtered to contain centerline)
@@ -233,6 +244,7 @@ class MeshPlaneSlicer:
 
         # Check which loops contain the centerline
         centerline_loop_found = False
+        containing_polygon = None
 
         for poly_idx, entity_idx in enumerate(polygon_metadata):
             entity = slice_result_3d.entities[entity_idx]
@@ -249,6 +261,7 @@ class MeshPlaneSlicer:
             # Check if centerline (0,0) is inside this polygon
             if polygon_custom.is_valid and polygon_custom.contains(centerline_2d):
                 centerline_loop_found = True
+                containing_polygon = all_polygons[poly_idx]
                 break
 
         # If no loop contains the centerline, reject this plane
@@ -256,6 +269,11 @@ class MeshPlaneSlicer:
             # Warning: no loop contains centerline (shouldn't happen)
             # Return empty to reject this plane
             return []
+
+        if keep_only_containing:
+            # Single-passage (mouth-only): drop residual disconnected loops (closed
+            # nasal cavity), keep only the lumen the centerline passes through.
+            return [containing_polygon]
 
         # Keep ALL loops - requirement is to keep all closed loops
         # The centerline loop is guaranteed to exist (checked above)
