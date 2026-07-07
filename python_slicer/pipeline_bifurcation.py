@@ -161,7 +161,11 @@ def main():
     # ── Step 0: Branch detection (frame 0) ───────────────────
     logger.info(f"\n--- Step 0: Branch detection ---")
     branches_dir = subject_dir / "branches"
-    surface_stl, seeds_json = resolve_surface_and_seeds(subject_dir)
+    try:
+        surface_stl, seeds_json = resolve_surface_and_seeds(subject_dir)
+    except ValueError as e:
+        logger.error(str(e))
+        sys.exit(1)
 
     if not branches_dir.exists():
         logger.info("  Running branch detection on frame 0 (vmtk env)...")
@@ -245,6 +249,7 @@ def main():
         generate_motion_frames(
             subject_dir=subject_dir,
             start=args.start, stop=args.stop, step=args.step,
+            surface_stl=str(surface_stl),
         )
         n_existing = len(list(stl_dir.glob("*.stl")))
 

@@ -219,6 +219,7 @@ def generate_motion_frames(
     start: float = 0,
     stop: float = 2000,
     step: float = 100,
+    surface_stl=None,
 ):
     """Generate deformed STL + centerline frames for a subject.
 
@@ -265,11 +266,17 @@ def generate_motion_frames(
         raise RuntimeError("MIRTK not found. Install MIRTK and ensure 'mirtk' is in PATH.")
 
     # ── Deform surface STL ──────────────────────────────────
-    # Find the single STL in surface/ (any name)
-    surface_stls = list((subject_dir / "surface").glob("*.stl"))
-    if not surface_stls:
-        raise FileNotFoundError(f"No STL found in {subject_dir / 'surface'}")
-    frame0_stl = surface_stls[0]
+    # Use the resolved surface if provided (e.g. the cap-free open-profile mesh
+    # matching the topology Step 1 used for face labels). Otherwise fall back to
+    # discovering the single STL in surface/ (any name), excluding _derived/.
+    if surface_stl is not None:
+        frame0_stl = Path(surface_stl)
+    else:
+        surface_stls = [p for p in (subject_dir / "surface").glob("*.stl")
+                         if p.parent.name != "_derived"]
+        if not surface_stls:
+            raise FileNotFoundError(f"No STL found in {subject_dir / 'surface'}")
+        frame0_stl = surface_stls[0]
 
     stl_out_dir = motion_dir / "stl"
     stl_out_dir.mkdir(parents=True, exist_ok=True)
