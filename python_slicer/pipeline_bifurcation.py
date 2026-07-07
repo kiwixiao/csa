@@ -197,7 +197,9 @@ def main():
 
     # ── Step 1: Septum refinement (frame 0) ────────────────
     logger.info(f"\n--- Step 1: Septum refinement ---")
-    frame0_stl = find_surface_stl(subject_dir)
+    # Use the resolved open-profile (wall) — for a named multi-solid STL this is the
+    # cap-free wall mesh, and it matches the topology of the deformed motion frames.
+    frame0_stl = surface_stl
     full_mesh = read_stl(str(frame0_stl))
     left_cl_f0 = read_vtk_centerline(str(branches["LeftNose"]["centerline"]))
     right_cl_f0 = read_vtk_centerline(str(branches["RightNose"]["centerline"]))
