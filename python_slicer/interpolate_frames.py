@@ -299,8 +299,9 @@ def generate_motion_frames(
     # Find centerline files in branches/
     centerline_configs = []
 
-    # Left nose
-    for label in ["LeftNose", "RightNose"]:
+    # Inlet full-path centerlines (Trachea_to_<inlet>). Mouth included so the
+    # mouth-only / single-branch path gets a per-frame deformed centerline too.
+    for label in ["LeftNose", "RightNose", "Mouth"]:
         cl_dir = branches_dir / label
         if not cl_dir.exists():
             continue

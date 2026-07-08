@@ -79,6 +79,30 @@ def _process_frame(args_tuple):
     return fi, frame_name, rows
 
 
+def _process_single_branch_frame(args_tuple):
+    """Worker: slice one deformed frame of a single-passage (mouth-only) airway.
+
+    Uses the per-frame deformed inlet centerline when available, else the frame-0
+    centerline. Slices the whole (deformed) wall with keep_only_containing via
+    run_single_branch_frame.
+    """
+    (fi, stl_file, frame_output, inlet_cl_f0, inlet_cl_dir, inlet) = args_tuple
+    frame_name = Path(stl_file).stem
+
+    cl = inlet_cl_f0
+    if inlet_cl_dir:
+        cl_file = Path(inlet_cl_dir) / f"{frame_name}.vtk"
+        if cl_file.exists():
+            cl = read_vtk_centerline(str(cl_file))
+
+    rows = run_single_branch_frame(
+        str(stl_file), str(frame_output), frame_name, cl, inlet, log=None)
+    for row in rows:
+        row["frame_name"] = frame_name
+        row["frame_index"] = fi
+    return fi, frame_name, rows
+
+
 def find_surface_stl(subject_dir):
     """Find the single STL file in surface/ folder (any name)."""
     surface_dir = Path(subject_dir) / "surface"
@@ -198,10 +222,8 @@ def main():
     has_left, has_right, has_mouth = regions["has_left"], regions["has_right"], regions["has_mouth"]
     logger.info(f"  Regions present: {regions['inlets']} (+ DescendingAirway)")
     if not (has_left and has_right):
-        logger.warning("  Fewer than two nostrils present; septum split will be "
-                       "skipped for missing sides (see mouth-only handling).")
-
-        # ── Single-branch path (mouth-only or single nostril): no septum ──
+        # ── Single-branch path (mouth-only / single nostril): no septum ──
+        # Morph the open-profile + inlet centerline across frames, then slice each.
         inlets = regions["inlets"]
         if len(inlets) != 1:
             logger.error(
@@ -215,21 +237,119 @@ def main():
                 f"Single-branch slicing of a lone nostril ({inlet}) uses keep-only-"
                 f"containing, which may undercount turbinate loops.")
         logger.info(f"\n--- Single-branch pipeline: {inlet} -> DescendingAirway ---")
-        inlet_cl = read_vtk_centerline(str(branches[inlet]["centerline"]))
+        inlet_cl_f0 = read_vtk_centerline(str(branches[inlet]["centerline"]))
 
-        # Slice frame-0 surface (extend to motion frames later if needed)
-        frame0_stl = surface_stl
-        rows = run_single_branch_frame(str(frame0_stl), str(output_dir / "frames" / "frame0"),
-                                       "frame0", inlet_cl, inlet, logger)
-        for r in rows:
-            r["frame_name"] = "frame0"; r["frame_index"] = 0
-        df = pd.DataFrame(rows)
+        motion_dir = subject_dir / "motion"
+        stl_dir = motion_dir / "stl"
+        reg_ok = (subject_dir / "registration" / "ffds.csv").exists()
+
+        # ── Step 2: Morph (deform open-profile + inlet centerline) ──
+        n_existing = len(list(stl_dir.glob("*.stl"))) if stl_dir.exists() else 0
+        if not reg_ok:
+            logger.warning("  No registration/ffds.csv — slicing frame 0 only "
+                           "(no breathing-cycle morph).")
+        elif args.skip_interp and n_existing > 0:
+            logger.info(f"\n--- Step 2: Skipping interpolation ({n_existing} STLs exist) ---")
+        else:
+            logger.info(f"\n--- Step 2: Generating deformed frames ---")
+            generate_motion_frames(
+                subject_dir=subject_dir,
+                start=args.start, stop=args.stop, step=args.step,
+                surface_stl=str(surface_stl),
+            )
+            n_existing = len(list(stl_dir.glob("*.stl")))
+
+        # Frame list: deformed frames if morphed, else frame 0 (the open profile)
+        if reg_ok and n_existing > 0:
+            stl_files = sorted(stl_dir.glob("*.stl"))
+            if args.frames:
+                selected = set()
+                for part in args.frames.split(","):
+                    part = part.strip()
+                    if "-" in part:
+                        a, b = part.split("-", 1)
+                        selected.update(range(int(a), int(b) + 1))
+                    else:
+                        selected.add(int(part))
+                stl_files = [f for i, f in enumerate(stl_files) if i in selected]
+                logger.info(f"  Selected frames: {sorted(selected)} ({len(stl_files)} files)")
+            elif args.max_frames > 0:
+                stl_files = stl_files[:args.max_frames]
+                logger.info(f"  Limited to {args.max_frames} frames")
+            inlet_cl_dir = str(motion_dir / "centerlines" / inlet.lower())
+        else:
+            stl_files = [Path(surface_stl)]
+            inlet_cl_dir = None
+
+        # ── Step 3: Slice each frame (single passage, keep-only-containing) ──
+        logger.info(f"\n--- Step 3: Slicing {len(stl_files)} frame(s) [{inlet}] ---")
+        all_frame_rows = []
+        frame_plane_indices = defaultdict(lambda: defaultdict(set))
+        tasks = [
+            (fi, str(f), str(output_dir / "frames" / f.stem),
+             inlet_cl_f0, inlet_cl_dir, inlet)
+            for fi, f in enumerate(stl_files)
+        ]
+        try:
+            available = len(os.sched_getaffinity(0))
+        except AttributeError:
+            available = os.cpu_count() or 1
+        n_workers = min(available, len(tasks))
+        logger.info(f"  Processing {len(tasks)} frame(s) with {n_workers} workers")
+
+        if n_workers <= 1:
+            for task in tasks:
+                fi, frame_name, rows = _process_single_branch_frame(task)
+                logger.info(f"  Frame {fi+1}/{len(tasks)}: {frame_name}")
+                for row in rows:
+                    frame_plane_indices[row["region"]][fi].add(row["plane_index"])
+                all_frame_rows.extend(rows)
+        else:
+            completed = 0
+            with ProcessPoolExecutor(max_workers=n_workers) as executor:
+                futures = {executor.submit(_process_single_branch_frame, t): t[0]
+                           for t in tasks}
+                for future in as_completed(futures):
+                    fi, frame_name, rows = future.result()
+                    completed += 1
+                    logger.info(f"  Completed {completed}/{len(tasks)}: {frame_name}")
+                    for row in rows:
+                        frame_plane_indices[row["region"]][fi].add(row["plane_index"])
+                    all_frame_rows.extend(rows)
+
+        df = pd.DataFrame(all_frame_rows)
         if len(df) == 0:
             logger.error("No data produced (single-branch)!"); sys.exit(1)
-        csv_all = output_dir / f"{subject_id}-Data.csv"
-        df.to_csv(csv_all, index=False)
-        generate_csa_plot(csv_all, output_dir / f"{subject_id}-CSA_plot.png", subject_id)
-        logger.info(f"\nDONE (single-branch). Output: {output_dir}")
+
+        # ── Steps 4-5: Mutual planes (present in all frames) + combine ──
+        if len(stl_files) > 1:
+            region_frames = frame_plane_indices[inlet]
+            mutual = None
+            for _fi, idxs in region_frames.items():
+                mutual = idxs.copy() if mutual is None else (mutual & idxs)
+            mutual = mutual or set()
+            logger.info(f"  {inlet}: {len(mutual)} mutual planes across "
+                        f"{len(region_frames)} frames")
+            df_mutual = df[df["plane_index"].isin(mutual)].copy()
+        else:
+            df_mutual = df
+
+        df.to_csv(output_dir / f"{subject_id}-Data-all.csv", index=False)
+        csv_mutual = output_dir / f"{subject_id}-Data.csv"
+        df_mutual.to_csv(csv_mutual, index=False)
+        generate_csa_plot(csv_mutual, output_dir / f"{subject_id}-CSA_plot.png", subject_id)
+
+        # ── Step 6-7: summary + per-region post-processing ──
+        # (CSA-by-index / band / breathing-phase heatmap / compliance). These are
+        # region-agnostic, so the single Mouth region gets the same analysis the
+        # both-nostril regions do. refine_result is None (no septum on this path).
+        generate_summary(csv_mutual, output_dir / f"{subject_id}-summary.txt",
+                         subject_id, None)
+        from postprocess_bifurcation import run_postprocessing
+        run_postprocessing(output_dir, subject_id)
+
+        logger.info(f"\nDONE (single-branch, {len(stl_files)} frame(s)). "
+                    f"Output: {output_dir}")
         return
 
     # ── Step 1: Septum refinement (frame 0) ────────────────

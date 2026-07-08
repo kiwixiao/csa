@@ -445,7 +445,8 @@ def generate_combined_plane_stls(frames_dir, output_dir, subject_id):
         frame_name = frame_dir.name
         all_stls = []
 
-        for region_folder in ["DescendingAirway_Planes", "LeftNose_Planes", "RightNose_Planes"]:
+        for region_folder in ["DescendingAirway_Planes", "LeftNose_Planes",
+                              "RightNose_Planes", "Mouth_Planes"]:
             region_dir = frame_dir / region_folder
             if region_dir.exists():
                 stl_files = sorted(region_dir.glob("*.stl"))
