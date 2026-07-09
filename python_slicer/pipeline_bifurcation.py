@@ -80,23 +80,46 @@ def _process_frame(args_tuple):
 
 
 def _process_single_branch_frame(args_tuple):
-    """Worker: slice one deformed frame of a single-passage (mouth-only) airway.
+    """Worker: slice one deformed frame of a no-septum airway.
 
-    Uses the per-frame deformed inlet centerline when available, else the frame-0
-    centerline. Slices the whole (deformed) wall with keep_only_containing via
-    run_single_branch_frame.
+    Handles mouth-only, single-nostril, and the 1-nostril+mouth bifurcation. For
+    each inlet, uses the per-frame deformed centerline when available, else the
+    frame-0 one. With a single inlet the whole passage is one region; with two
+    inlets the shared trunk (below the frame-0 divergence index) is sliced as
+    DescendingAirway and each branch (above it) as its own region. Every region is
+    sliced with keep_only_containing via run_single_branch_frame.
+
+    args_tuple: (fi, stl_file, frame_output, inlet_specs, div_idx) where
+    inlet_specs is a list of (region_name, cl_f0, cl_dir|None) and div_idx is None
+    for a single passage or the bifurcation split index for two inlets.
     """
-    (fi, stl_file, frame_output, inlet_cl_f0, inlet_cl_dir, inlet) = args_tuple
+    (fi, stl_file, frame_output, inlet_specs, div_idx) = args_tuple
     frame_name = Path(stl_file).stem
 
-    cl = inlet_cl_f0
-    if inlet_cl_dir:
-        cl_file = Path(inlet_cl_dir) / f"{frame_name}.vtk"
-        if cl_file.exists():
-            cl = read_vtk_centerline(str(cl_file))
+    # Resolve each inlet's centerline for this frame (deformed if present, else f0)
+    cls = []
+    for region_name, cl_f0, cl_dir in inlet_specs:
+        cl = cl_f0
+        if cl_dir:
+            cl_file = Path(cl_dir) / f"{frame_name}.vtk"
+            if cl_file.exists():
+                cl = read_vtk_centerline(str(cl_file))
+        cls.append((region_name, cl))
 
-    rows = run_single_branch_frame(
-        str(stl_file), str(frame_output), frame_name, cl, inlet, log=None)
+    # Build the (region, centerline) list to slice
+    if div_idx is None:
+        slice_list = cls                        # single passage per inlet
+    else:
+        (r1, cl1), (r2, cl2) = cls[0], cls[1]    # bifurcation: trunk + 2 branches
+        d = min(div_idx, len(cl1) - 1, len(cl2) - 1)
+        slice_list = [("DescendingAirway", cl1[:d]), (r1, cl1[d:]), (r2, cl2[d:])]
+
+    rows = []
+    for region, cl in slice_list:
+        if len(cl) < 2:
+            continue
+        rows.extend(run_single_branch_frame(
+            str(stl_file), str(frame_output), frame_name, cl, region, log=None))
     for row in rows:
         row["frame_name"] = frame_name
         row["frame_index"] = fi
@@ -222,22 +245,35 @@ def main():
     has_left, has_right, has_mouth = regions["has_left"], regions["has_right"], regions["has_mouth"]
     logger.info(f"  Regions present: {regions['inlets']} (+ DescendingAirway)")
     if not (has_left and has_right):
-        # ── Single-branch path (mouth-only / single nostril): no septum ──
-        # Morph the open-profile + inlet centerline across frames, then slice each.
+        # ── No-septum path: mouth-only, single nostril, or 1-nostril+mouth ──
+        # One inlet = a single passage. Two inlets = a plain bifurcation: split the
+        # inlet centerlines at their divergence point into a shared DescendingAirway
+        # trunk + per-inlet branches. No septum reasoning (that is only needed to
+        # separate two nostrils sharing one nasal cavity).
         inlets = regions["inlets"]
-        if len(inlets) != 1:
+        if len(inlets) > 2:
             logger.error(
-                f"Single-branch path supports exactly one inlet, got {inlets}. "
-                f"Asymmetric configs (e.g. a single nostril plus mouth) are not "
-                f"supported — need either both nostrils (septum path) or mouth-only.")
+                f"No-septum path supports at most two inlets, got {inlets}. "
+                f"Three+ inlets without both nostrils is unexpected.")
             sys.exit(1)
-        inlet = inlets[0]
-        if inlet != "Mouth":
-            logger.warning(
-                f"Single-branch slicing of a lone nostril ({inlet}) uses keep-only-"
-                f"containing, which may undercount turbinate loops.")
-        logger.info(f"\n--- Single-branch pipeline: {inlet} -> DescendingAirway ---")
-        inlet_cl_f0 = read_vtk_centerline(str(branches[inlet]["centerline"]))
+        for r in inlets:
+            if r in ("LeftNose", "RightNose"):
+                logger.warning(
+                    f"Single-nostril slicing of {r} uses keep-only-containing, "
+                    f"which may undercount turbinate loops.")
+
+        inlet_cl_f0 = {r: read_vtk_centerline(str(branches[r]["centerline"]))
+                       for r in inlets}
+        if len(inlets) == 1:
+            div_idx = None
+            logger.info(f"\n--- Single-branch pipeline: {inlets[0]} -> "
+                        f"DescendingAirway ---")
+        else:
+            from slicer.septum_refine import find_divergence_index
+            r1, r2 = inlets
+            div_idx = find_divergence_index(inlet_cl_f0[r1], inlet_cl_f0[r2])
+            logger.info(f"\n--- Bifurcation pipeline (no septum): {inlets} diverge "
+                        f"at index {div_idx} -> DescendingAirway trunk + branches ---")
 
         motion_dir = subject_dir / "motion"
         stl_dir = motion_dir / "stl"
@@ -276,18 +312,24 @@ def main():
             elif args.max_frames > 0:
                 stl_files = stl_files[:args.max_frames]
                 logger.info(f"  Limited to {args.max_frames} frames")
-            inlet_cl_dir = str(motion_dir / "centerlines" / inlet.lower())
+            morphed = True
         else:
             stl_files = [Path(surface_stl)]
-            inlet_cl_dir = None
+            morphed = False
 
-        # ── Step 3: Slice each frame (single passage, keep-only-containing) ──
-        logger.info(f"\n--- Step 3: Slicing {len(stl_files)} frame(s) [{inlet}] ---")
+        # Per-inlet slice spec: (region, frame-0 CL, per-frame deformed CL dir | None)
+        inlet_specs = [
+            (r, inlet_cl_f0[r],
+             str(motion_dir / "centerlines" / r.lower()) if morphed else None)
+            for r in inlets
+        ]
+
+        # ── Step 3: Slice each frame (single passage or bifurcation) ──
+        logger.info(f"\n--- Step 3: Slicing {len(stl_files)} frame(s) {inlets} ---")
         all_frame_rows = []
         frame_plane_indices = defaultdict(lambda: defaultdict(set))
         tasks = [
-            (fi, str(f), str(output_dir / "frames" / f.stem),
-             inlet_cl_f0, inlet_cl_dir, inlet)
+            (fi, str(f), str(output_dir / "frames" / f.stem), inlet_specs, div_idx)
             for fi, f in enumerate(stl_files)
         ]
         try:
@@ -321,16 +363,20 @@ def main():
         if len(df) == 0:
             logger.error("No data produced (single-branch)!"); sys.exit(1)
 
-        # ── Steps 4-5: Mutual planes (present in all frames) + combine ──
+        # ── Steps 4-5: Mutual planes (present in all frames), per region ──
         if len(stl_files) > 1:
-            region_frames = frame_plane_indices[inlet]
-            mutual = None
-            for _fi, idxs in region_frames.items():
-                mutual = idxs.copy() if mutual is None else (mutual & idxs)
-            mutual = mutual or set()
-            logger.info(f"  {inlet}: {len(mutual)} mutual planes across "
-                        f"{len(region_frames)} frames")
-            df_mutual = df[df["plane_index"].isin(mutual)].copy()
+            mutual_indices = {}
+            for region, region_frames in frame_plane_indices.items():
+                mutual = None
+                for _fi, idxs in region_frames.items():
+                    mutual = idxs.copy() if mutual is None else (mutual & idxs)
+                mutual_indices[region] = mutual or set()
+                logger.info(f"  {region}: {len(mutual_indices[region])} mutual planes "
+                            f"across {len(region_frames)} frames")
+            mask = df.apply(
+                lambda row: row["plane_index"] in mutual_indices.get(row["region"], set()),
+                axis=1)
+            df_mutual = df[mask].copy()
         else:
             df_mutual = df
 
