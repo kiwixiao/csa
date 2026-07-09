@@ -589,8 +589,9 @@ def generate_4panel_video(combined_dir, motion_stl_dir, df, output_dir,
 
     # Pre-compute CSA band per region
     region_stats = {}
-    region_colors = {"DescendingAirway": "gray", "LeftNose": "blue", "RightNose": "red"}
-    for region in ["DescendingAirway", "LeftNose", "RightNose"]:
+    region_colors = {"DescendingAirway": "gray", "LeftNose": "blue",
+                     "RightNose": "red", "Mouth": "orange"}
+    for region in ["DescendingAirway", "LeftNose", "RightNose", "Mouth"]:
         rdf = df[df["region"] == region]
         if len(rdf) == 0:
             continue
@@ -701,7 +702,8 @@ def generate_4panel_video(combined_dir, motion_stl_dir, df, output_dir,
         region_plane_paths = {}
         for region, folder in [("DescendingAirway", "DescendingAirway_Planes"),
                                ("LeftNose", "LeftNose_Planes"),
-                               ("RightNose", "RightNose_Planes")]:
+                               ("RightNose", "RightNose_Planes"),
+                               ("Mouth", "Mouth_Planes")]:
             rd = frame_planes_dir / folder
             if rd.exists():
                 region_plane_paths[region] = sorted(rd.glob("*.stl"))
@@ -863,8 +865,9 @@ def generate_highlighted_video(combined_dir, motion_stl_dir, df, output_dir,
 
     # Pre-compute CSA band per region
     region_stats = {}
-    region_colors_plot = {"DescendingAirway": "gray", "LeftNose": "blue", "RightNose": "red"}
-    for region in ["DescendingAirway", "LeftNose", "RightNose"]:
+    region_colors_plot = {"DescendingAirway": "gray", "LeftNose": "blue",
+                          "RightNose": "red", "Mouth": "orange"}
+    for region in ["DescendingAirway", "LeftNose", "RightNose", "Mouth"]:
         rdf = df[df["region"] == region]
         if len(rdf) == 0:
             continue
