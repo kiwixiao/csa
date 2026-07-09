@@ -62,16 +62,21 @@ def compute_plane_normal(centerline_points: np.ndarray, index: int,
 
 def compute_all_plane_normals(centerline_points: np.ndarray,
                               smooth: bool = True,
-                              znormal: bool = False) -> np.ndarray:
+                              znormal: bool = False,
+                              window: int = 6) -> np.ndarray:
     """
-    Compute normal vectors for all centerline points
+    Compute the plane normal (local axis tangent) for all centerline points.
 
-    Replaces: normals calculation loop in trachSlice_OSA_AB_3.m
+    When smooth=True (default), each normal is the local airway-axis direction
+    from a PCA line-fit over a +/-window neighbourhood of centerline points -- it
+    tracks the true axis smoothly without the bend-bleed of a fixed global moving
+    average. When smooth=False, the raw 2-point central-difference tangent is used.
 
     Args:
         centerline_points: Nx3 array of centerline points
-        smooth: If True, apply smoothing to normals
+        smooth: If True, PCA line-fit tangent; if False, raw central difference
         znormal: If True, use fixed [0, 0, 1] normal
+        window: +/- neighbourhood (in points) for the PCA line-fit (default 6)
 
     Returns:
         Nx3 array of unit normal vectors
@@ -79,39 +84,36 @@ def compute_all_plane_normals(centerline_points: np.ndarray,
     n_points = len(centerline_points)
     normals = np.zeros_like(centerline_points)
 
-    # Compute centerline normals for all points
-    for i in range(n_points):
-        normals[i] = compute_plane_normal(centerline_points, i, smooth=False, znormal=znormal)
+    if znormal:
+        normals[:] = np.array([0.0, 0.0, 1.0])
+        return normals
 
-    # Apply smoothing FIRST (MATLAB: normals = smoothdata(normals))
-    if smooth and not znormal:
-        # Use moving average to match MATLAB's smoothdata() default behavior
-        # MATLAB smoothdata() uses automatic window size, we use 20 for smoother normals
-        window = 20
-        if n_points >= window:
-            # Pad edges to handle boundaries
-            normals_padded = np.pad(normals, ((window//2, window//2), (0, 0)), mode='edge')
-            # Apply moving average
-            from scipy.ndimage import uniform_filter1d
-            normals_smooth = uniform_filter1d(normals_padded, size=window, axis=0)
-            # Remove padding
-            normals = normals_smooth[window//2:window//2+n_points]
-            # Re-normalize after smoothing
-            norms = np.linalg.norm(normals, axis=1, keepdims=True)
-            norms[norms == 0] = 1  # Avoid division by zero
-            normals = normals / norms
+    if smooth and n_points >= 3:
+        # Local axis direction = 1st principal component of a +/-window
+        # neighbourhood (PCA line-fit): smooth AND locally axial.
+        for i in range(n_points):
+            seg = centerline_points[max(0, i - window):min(n_points, i + window + 1)]
+            seg = seg - seg.mean(axis=0)
+            _, _, vt = np.linalg.svd(seg, full_matrices=False)
+            normals[i] = vt[0]
+    else:
+        # Raw 2-point central-difference tangent
+        for i in range(n_points):
+            normals[i] = compute_plane_normal(centerline_points, i, smooth=False)
 
-    # CRITICAL FIX: Ensure normals are consistently oriented along centerline
-    # If consecutive normals point in opposite directions, flip them
-    if not znormal and n_points > 1:
+    # Orient the first normal toward increasing arc length, then keep consecutive
+    # normals aligned (the PCA sign is otherwise arbitrary per point).
+    if n_points > 1:
+        if np.dot(normals[0], centerline_points[1] - centerline_points[0]) < 0:
+            normals[0] = -normals[0]
         for i in range(1, n_points):
-            # Check if normal[i] points in similar direction to normal[i-1]
-            dot_product = np.dot(normals[i], normals[i-1])
-            if dot_product < 0:
-                # Normals are pointing in opposite directions - flip current one
+            if np.dot(normals[i], normals[i - 1]) < 0:
                 normals[i] = -normals[i]
 
-    return normals
+    # Normalize
+    norms = np.linalg.norm(normals, axis=1, keepdims=True)
+    norms[norms == 0] = 1.0
+    return normals / norms
 
 
 def rotate_to_xy_plane(points_3d: np.ndarray,
