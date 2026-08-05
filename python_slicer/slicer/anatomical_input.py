@@ -7,6 +7,7 @@ feed the existing branch-detection / slicing pipeline.
 """
 import json
 import logging
+import re
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -58,11 +59,80 @@ _ALIASES = {
     "nr": "rightnose",
 }
 
+# Vocabularies for the general matcher. A token matches exactly; entries of
+# 4+ characters additionally match as substrings, so glued names like
+# "leftnose" resolve without needing a separator. Short entries ("l", "r",
+# "out") are token-only to avoid firing inside unrelated words.
+_LEFT = {"left", "l", "lt", "lh", "lft"}
+_RIGHT = {"right", "r", "rt", "rh", "rgt"}
+_NOSE = {"nose", "nasal", "nostril", "naris", "nares", "nasalcavity"}
+_MOUTH = {"mouth", "oral", "oris", "buccal"}
+_OUTLET = {"outlet", "out", "trachea", "tracheal", "descending", "descend",
+           "desc", "exit", "outflow", "bronchi", "bronchus", "bronchial",
+           "bronchiole"}
+_WALL = {"wall", "walls", "lumen", "surface", "airway"}
+
+_CAMEL_LOWER_UPPER = re.compile(r"([a-z0-9])([A-Z])")
+_CAMEL_ACRONYM = re.compile(r"([A-Z]+)([A-Z][a-z])")
+_NON_ALNUM = re.compile(r"[^A-Za-z0-9]+")
+_TRAILING_DIGITS = re.compile(r"\d+$")
+
+
+def _tokenize(name: str) -> "list[str]":
+    """Split a solid name into lowercase tokens, honouring camelCase."""
+    spaced = _CAMEL_ACRONYM.sub(r"\1 \2", _CAMEL_LOWER_UPPER.sub(r"\1 \2", name))
+    tokens = []
+    for part in _NON_ALNUM.split(spaced):
+        if not part:
+            continue
+        part = part.lower()
+        tokens.append(_TRAILING_DIGITS.sub("", part) or part)
+    return tokens
+
+
+def _matches(tokens: "list[str]", glued: str, vocab: "set[str]") -> bool:
+    """True if a token is in vocab, or a 4+ char vocab entry occurs in glued."""
+    if any(t in vocab for t in tokens):
+        return True
+    return any(k in glued for k in vocab if len(k) >= 4)
+
 
 def normalize_cap_name(name: str) -> str:
-    """Lowercase, strip non-alphanumerics, resolve common synonyms."""
-    key = "".join(ch for ch in name.strip().lower() if ch.isalnum())
-    return _ALIASES.get(key, key)
+    """Map a solid name onto leftnose/rightnose/mouth/outlet/wall.
+
+    Matching is deliberately permissive: case, separators, camelCase and
+    trailing digits are all ignored, so "LeftNose", "left nose", "left_nose",
+    "LEFT-NOSE", "nose_left", "leftNasal" and "L nostril" all resolve to
+    "leftnose". Names that match nothing are returned normalized but otherwise
+    unchanged, so classify_solids still reports them as unknown.
+    """
+    glued = "".join(ch for ch in name.strip().lower() if ch.isalnum())
+    if not glued:
+        return glued
+    if glued in _ALIASES:
+        return _ALIASES[glued]
+    if glued in CAP_LABELS or glued == "wall":
+        return glued
+
+    tokens = _tokenize(name)
+    left = _matches(tokens, glued, _LEFT)
+    right = _matches(tokens, glued, _RIGHT)
+
+    # Side + nose wins over everything; a name carrying both sides is
+    # ambiguous and falls through to "unknown" rather than guessing.
+    if _matches(tokens, glued, _NOSE) and left != right:
+        return "leftnose" if left else "rightnose"
+    if _matches(tokens, glued, _MOUTH):
+        return "mouth"
+    if _matches(tokens, glued, _OUTLET):
+        return "outlet"
+    if _matches(tokens, glued, _WALL):
+        return "wall"
+    # Bare side with no region word, matching the historical "left"/"right"
+    # aliases.
+    if left != right:
+        return "leftnose" if left else "rightnose"
+    return glued
 
 
 @dataclass

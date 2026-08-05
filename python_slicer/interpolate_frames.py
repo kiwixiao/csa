@@ -186,15 +186,34 @@ def interpolate_mesh(
     )
 
     # Generate output frames, restricted to the interpolation domain.
-    ts = np.arange(start, stop + step, step)
-    tol = abs(step) * 1e-6
-    ts = ts[(ts >= time_points[0] - tol) & (ts <= time_points[-1] + tol)]
-    ts = np.clip(ts, time_points[0], time_points[-1])
-    if len(ts) == 0:
+    #
+    # Build the grid so it never leaves the DOF span (the interpolator uses
+    # bounds_error=True) and so a step that does not divide the span evenly
+    # still reaches the final time point. The previous
+    # np.arange(start, stop + step, step) overshot whenever step did not divide
+    # the span, and the overshoot was then filtered away -- silently dropping
+    # the tail (e.g. step=25 over 0..2180 stopped at 2175, losing 5 ms).
+    lo, hi = float(time_points[0]), float(time_points[-1])
+    eff_start = max(float(start), lo)
+    eff_stop = min(float(stop), hi)
+    if step <= 0:
+        raise ValueError(f"--step must be positive, got {step}")
+    if eff_stop < eff_start:
         raise ValueError(
             f"Requested time range [{start}, {stop}] does not overlap DOF span "
             f"[{time_points[0]}, {time_points[-1]}]"
         )
+
+    n_full = int(np.floor((eff_stop - eff_start) / step + 1e-9))
+    ts = eff_start + step * np.arange(n_full + 1)
+    if not np.isclose(ts[-1], eff_stop):
+        remainder = eff_stop - ts[-1]
+        log.info(
+            f"  Step {step:g} does not divide the {eff_start:g}->{eff_stop:g} span "
+            f"evenly; appending remainder endpoint t={eff_stop:g} "
+            f"(final interval {remainder:g} ms)"
+        )
+        ts = np.append(ts, eff_stop)
     output_paths = []
     for t in ts:
         points = interpolator(t)
@@ -368,7 +387,7 @@ Examples:
     parser.add_argument("subject_dir", help="Subject directory (e.g., ENT001/)")
     parser.add_argument("--start", type=float, default=0, help="Start time (ms)")
     parser.add_argument("--stop", type=float, default=2000, help="Stop time (ms)")
-    parser.add_argument("--step", type=float, default=100, help="Time step (ms)")
+    parser.add_argument("--step", type=float, default=25, help="Time step (ms)")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="%(message)s")

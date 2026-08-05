@@ -186,7 +186,7 @@ def main():
                         help="Skip interpolation if motion/ already populated")
     parser.add_argument("--start", type=float, default=0)
     parser.add_argument("--stop", type=float, default=2000)
-    parser.add_argument("--step", type=float, default=100)
+    parser.add_argument("--step", type=float, default=25)
     parser.add_argument("--max-frames", type=int, default=0,
                         help="Max frames to process (0=all, e.g. 5 for testing)")
     parser.add_argument("--frames", type=str, default="",
