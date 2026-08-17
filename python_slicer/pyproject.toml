@@ -18,6 +18,10 @@ dependencies = [
     "networkx>=3.0",
     "rtree>=1.0.0",
     "plotly>=5.0.0",
+    # trimesh triangulation engine — REQUIRED: without it triangulate_polygon
+    # raises "No available triangulation engine!", which the per-plane except in
+    # slice_bifurcation.py swallows, silently dropping planes from the output
+    "mapbox_earcut>=1.0.0",
 ]
 
 [project.optional-dependencies]
