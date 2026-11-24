@@ -39,6 +39,8 @@ Requirements: Linux x86_64, conda >= 23 on PATH, internet, about 10 GB.
 ```bash
 git clone git@github.com:kiwixiao/csa.git && cd csa          # this repo (branch with cfd_postproc)
 bash cfd_postproc/setup.sh                                   # idempotent; see below
+#   ParaView 6.0.1 already installed elsewhere:  setup.sh --pvbatch /path/to/bin/pvbatch
+#   conda installed but not on PATH:             source <conda>/etc/profile.d/conda.sh  first
 source cfd_postproc/activate.sh                              # every new shell: conda env cfdpost + PVBATCH
 bash cfd_postproc/check_env.sh                               # must print "all OK"
 ```
@@ -50,7 +52,7 @@ bash cfd_postproc/check_env.sh                               # must print "all O
 | conda env **`mirtk`** | `mirtk-install/install.sh` (cloned next to this repo), then `pip install -e python_slicer` from this repo | MIRTK 2024.03.20, Python 3.11, vtk 9.4.2, trimesh 4.11.5 (`env/mirtk_env.yml`) |
 | conda env **`vmtk`** | `env/vmtk_env.yml` | vmtk 1.5.0, Python 3.10, vtk 9.2.6. `csa-bifurcation` calls it **by this name** (`conda run -n vmtk`). |
 | conda env **`cfdpost`** | `env/cfdpost_env.yml` | Python 3.11, numpy 1.26.4, scipy 1.13.1, matplotlib 3.9.2, pandas 2.2.3, pillow 10.4.0, ffmpeg, node |
-| **ParaView 6.0.1** | binary download to `~/opt` (or found in `/opt`), path written to `activate.sh` as `PVBATCH` | `ParaView-6.0.1-MPI-Linux-Python3.12-x86_64`, its own Python 3.12 (numpy 1.26.4, scipy 1.15.0) |
+| **ParaView 6.0.1** | `--pvbatch PATH`, or found in `/opt`, or binary download to `~/opt`; path written to `activate.sh` as `PVBATCH` | `ParaView-6.0.1-MPI-Linux-Python3.12-x86_64`, its own Python 3.12 (numpy 1.26.4, scipy 1.15.0) |
 | npm `docx` | `npm install` here (`package.json`) | 9.15.4 |
 
 Why this isn't one environment:

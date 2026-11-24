@@ -2,25 +2,28 @@
 # One-command setup of everything the CSA + CFD post-processing chain needs (Linux x86_64, conda >= 23 on PATH).
 # Idempotent: anything already present is left as it is.
 #
-#   bash cfd_postproc/setup.sh [--paraview-prefix DIR] [--mirtk-install DIR]
+#   bash cfd_postproc/setup.sh [--pvbatch PATH] [--paraview-prefix DIR] [--mirtk-install DIR]
 #
 #   1. conda env 'mirtk'   MIRTK + mirtk-pipeline (mirtk-install/install.sh), then csa-slicer from THIS repo (editable)
 #   2. conda env 'vmtk'    vmtk 1.5.0 (env/vmtk_env.yml); csa-bifurcation calls it by this name
 #   3. conda env 'cfdpost' python 3.11 + numpy/scipy/matplotlib/pandas/pillow + ffmpeg + node (env/cfdpost_env.yml)
-#   4. ParaView 6.0.1 (binary download into --paraview-prefix, default ~/opt) -> pvbatch for pvb.sh
+#   4. ParaView 6.0.1 -> pvbatch for pvb.sh: --pvbatch PATH (an installed 6.0.x), else /opt or --paraview-prefix
+#      (default ~/opt), else the binary is downloaded into --paraview-prefix
 #   5. npm install (docx) in cfd_postproc
 # Afterwards:  source cfd_postproc/activate.sh   then   bash cfd_postproc/check_env.sh
 set -e
 HERE=$(cd "$(dirname "$0")" && pwd); REPO=$(dirname "$HERE")
-PV_PREFIX=$HOME/opt; MIRTK_INSTALL=""
+PV_PREFIX=$HOME/opt; MIRTK_INSTALL=""; PVB_GIVEN=""
 while [ $# -gt 0 ]; do
   case $1 in
+    --pvbatch) PVB_GIVEN=$2; shift 2 ;;
     --paraview-prefix) PV_PREFIX=$2; shift 2 ;;
     --mirtk-install) MIRTK_INSTALL=$2; shift 2 ;;
     *) echo "unknown option $1"; exit 1 ;;
   esac
 done
-command -v conda >/dev/null || { echo "conda not found: install Miniconda first"; exit 1; }
+command -v conda >/dev/null || { echo "conda not found: install Miniconda first (or source <conda>/etc/profile.d/conda.sh)"; exit 1; }
+CONDA_BIN=${CONDA_EXE:-$(command -v conda)}   # absolute path, written into activate.sh
 has_env() { conda env list | awk '{print $1}' | grep -qx "$1"; }
 say() { echo; echo "=== $* ==="; }
 
@@ -50,7 +53,10 @@ has_env cfdpost && echo "env cfdpost exists - left as is" || conda env create -f
 
 say "4. ParaView 6.0.1"
 PV=ParaView-6.0.1-MPI-Linux-Python3.12-x86_64
-if [ -x /opt/$PV/bin/pvbatch ]; then
+if [ -n "$PVB_GIVEN" ]; then
+  "$PVB_GIVEN" --version 2>/dev/null | grep -q 'version 6\.0' || { echo "$PVB_GIVEN is not ParaView 6.0.x"; exit 1; }
+  PVBATCH=$PVB_GIVEN
+elif [ -x /opt/$PV/bin/pvbatch ]; then
   PVBATCH=/opt/$PV/bin/pvbatch
 elif [ -x "$PV_PREFIX/$PV/bin/pvbatch" ]; then
   PVBATCH=$PV_PREFIX/$PV/bin/pvbatch
@@ -67,7 +73,7 @@ say "5. node package (docx)"
 
 cat > "$HERE/activate.sh" <<EOT
 # source this before running the pipeline (written by setup.sh)
-eval "\$(conda shell.bash hook)"
+eval "\$($CONDA_BIN shell.bash hook)"
 conda activate cfdpost
 export PVBATCH=$PVBATCH
 EOT
