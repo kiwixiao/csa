@@ -127,6 +127,15 @@ subject/
 
 Files numbered in increments of 100 (000000 to 002000). STL and VTK counts must match.
 
+## CFD Post-processing (`cfd_postproc/`)
+
+Second half of the chain: CSA planes from `csa-bifurcation` + a STAR-CCM+ EnSight export -> pressure / flow / WOB on
+every plane, report PDF and video. Runbook: `cfd_postproc/README.md`; skill: `.claude/skills/cfd-postproc/SKILL.md`.
+Setup `cfd_postproc/setup.sh` (envs mirtk, vmtk, cfdpost + ParaView 6.0.1); driver
+`cfd_postproc/run_subject.sh cfd_postproc/subjects/<S>.env all`. ParaView scripts run only through `cfd_postproc/pvb.sh`.
+`facecheck` (slicer silently freezes CSA at t0 when face count != labels) and `motioncheck` (CFD mesh must follow the
+registration) are hard gates.
+
 ## Key Measurements
 
 Output CSV columns: `arc_length_mm`, `area_mm2`, `perimeter_mm`, `hydraulic_diameter_mm`, `equivalent_diameter_mm`, `major_axis_mm`, `minor_axis_mm`, `diameter_ratio`, `centroid_x/y/z`, `plane_index`, `is_valid`, `file_index`.

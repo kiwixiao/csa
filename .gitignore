@@ -69,4 +69,5 @@ ENV/
 .venv/
 
 # Claude Code
-.claude/
+.claude/*
+!.claude/skills/

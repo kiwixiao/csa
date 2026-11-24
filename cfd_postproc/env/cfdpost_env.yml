@@ -1,0 +1,16 @@
+# Conda env for the cfd_postproc python scripts (plots, tables, page/video composition) + ffmpeg + node.
+# Versions = the ones the ENT005 results were made with (/opt/anaconda3 base on the original machine).
+# ParaView-side scripts do NOT use this env: they run in ParaView's own python via pvb.sh.
+name: cfdpost
+channels:
+  - conda-forge
+dependencies:
+  - python=3.11
+  - numpy=1.26.4
+  - scipy=1.13.1
+  - matplotlib=3.9.2
+  - pandas=2.2.3
+  - pillow=10.4.0
+  - ffmpeg
+  - nodejs>=20
+  - poppler

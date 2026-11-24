@@ -1,0 +1,6 @@
+{
+  "name": "ent-postproc-report",
+  "private": true,
+  "description": "report_to_docx.js (pdf stage: CFD report -> .docx)",
+  "dependencies": { "docx": "9.15.4" }
+}
