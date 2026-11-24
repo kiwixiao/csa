@@ -280,9 +280,43 @@ def split_at_septum(
 
     # Two largest = LeftNose and RightNose
     top2 = comp_sizes.most_common(2)
-    if len(top2) < 2:
-        log.warning("Only 1 component above septum — cannot separate L/R")
-        labels[above_indices] = 1  # label everything as left
+    if len(top2) < 2 or top2[1][1] < min_component_size:
+        # The septum surface has a hole (septal perforation or a segmentation gap), so the
+        # left and right passages are one connected surface above the septum plane and the
+        # connectivity split cannot separate them (ENT005: 94327 faces vs 1). Fall back to
+        # GEODESIC labelling: each above-septum face goes to the nostril it is closer to when
+        # walking along the surface. Within a passage that walk is direct; reaching the other
+        # passage means detouring through the hole, so the hole barely moves the boundary.
+        # (Nearest-centerline labelling was tried and is unreliable: both nasal centerlines
+        # hug the septum, ~2.6 mm apart, so tall cavity faces are near-ties.)
+        from scipy.sparse.csgraph import dijkstra
+        log.warning("Septum does not separate L/R by connectivity (largest components: %s) "
+                    "- falling back to geodesic labelling from each nostril"
+                    % [sz for _, sz in comp_sizes.most_common(3)])
+        rr, cc = sub_adj_above.nonzero()
+        ctr = face_centers[above_indices]
+        w = np.linalg.norm(ctr[rr] - ctr[cc], axis=1) + 1e-9
+        G = csr_matrix((w, (rr, cc)), shape=sub_adj_above.shape)
+        tree = cKDTree(ctr)
+        def _seeds(cl):
+            # seed along the WHOLE nasal part of the centerline (points in front of the septum
+            # plane), not just its nostril end: seeding only at the nostril let the other side
+            # win the posterior medial wall by walking round the septum's free edge (ENT005 lost
+            # the back third of its LeftNose planes that way)
+            pts = cl[np.dot(cl - septum_pos, septum_normal) > 0]
+            if len(pts) < 2:
+                pts = cl
+            return np.unique(tree.query(pts, k=min(3, len(ctr)))[1].ravel())
+        d_left = dijkstra(G, directed=False, indices=_seeds(left_cl), min_only=True)
+        d_right = dijkstra(G, directed=False, indices=_seeds(right_cl), min_only=True)
+        lab = np.where(d_left <= d_right, 1, 2)
+        unreached = ~np.isfinite(d_left) & ~np.isfinite(d_right)
+        if unreached.any():                                   # isolated bits: nearest centerline
+            dl = cKDTree(left_cl).query(ctr[unreached])[0]; dr = cKDTree(right_cl).query(ctr[unreached])[0]
+            lab[unreached] = np.where(dl <= dr, 1, 2)
+        labels[above_indices] = lab
+        log.info(f"  Split result (geodesic fallback): Desc={(labels == 0).sum()}, "
+                 f"Left={(labels == 1).sum()}, Right={(labels == 2).sum()}, unreached={int(unreached.sum())}")
         return labels
 
     comp_a_id, comp_a_size = top2[0]
